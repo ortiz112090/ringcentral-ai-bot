@@ -1,0 +1,53 @@
+# Render Blueprint for the SR22 AI Voice Bot.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: ringcentral-ai-bot
+    runtime: node
+    plan: starter # long-running service; bump as call volume grows
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        value: "3000"
+      # PUBLIC_BASE_URL should be this service's Render URL, e.g.
+      # https://ringcentral-ai-bot.onrender.com — set after first deploy.
+      - key: PUBLIC_BASE_URL
+        sync: false
+      # ---- Secrets: set these in the Render dashboard (sync:false = not in git) ----
+      - key: RINGCENTRAL_CLIENT_ID
+        sync: false
+      - key: RINGCENTRAL_CLIENT_SECRET
+        sync: false
+      - key: RINGCENTRAL_SERVER_URL
+        value: https://platform.ringcentral.com
+      - key: RINGCENTRAL_JWT
+        sync: false
+      - key: ESCALATION_QUEUE_EXTENSION
+        sync: false
+      - key: RINGCENTRAL_WEBHOOK_VERIFICATION_TOKEN
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_STT_MODEL
+        value: gpt-4o-transcribe
+      - key: OPENAI_TTS_MODEL
+        value: gpt-4o-mini-tts
+      - key: OPENAI_TTS_VOICE
+        value: alloy
+      - key: SUPABASE_URL
+        value: https://hawjzggkndvxylzxvwvx.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: AGENT_NAME
+        sync: false
+      - key: BROKERAGE_NAME
+        sync: false
