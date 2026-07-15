@@ -1,6 +1,6 @@
 import { config } from "../config";
 import { logger } from "../logger";
-import { anthropic, firstTextBlock } from "../ai/anthropicClient";
+import { openai } from "../ai/openaiClient";
 import { createEmbedding } from "../speech/openai";
 import {
   getCallTag,
@@ -10,10 +10,10 @@ import {
 import { TrainingTurn } from "../db/types";
 
 /**
- * Lesson extraction: given a tagged segment of a real call, ask Claude to distill a
- * general, reusable lesson (situation → recommended response, plus what to avoid for
- * bad examples), stripped of the specific caller's name/details. The result is stored
- * in `learned_rules` as 'pending_review' — never used live until a human approves it.
+ * Lesson extraction: given a tagged segment of a real call, ask an OpenAI chat model to
+ * distill a general, reusable lesson (situation → recommended response, plus what to
+ * avoid for bad examples), stripped of the specific caller's name/details. The result is
+ * stored in `learned_rules` as 'pending_review' — never used live until a human approves it.
  */
 
 interface ExtractedLesson {
@@ -69,15 +69,18 @@ Extract the generalized lesson as specified.`;
 
   let lesson: ExtractedLesson;
   try {
-    const response = await anthropic.messages.create({
-      model: config.anthropic.model,
+    const response = await openai.chat.completions.create({
+      model: config.openai.chatModel,
       max_tokens: 500,
-      system: EXTRACTION_SYSTEM,
-      messages: [{ role: "user", content: userPrompt }],
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: EXTRACTION_SYSTEM },
+        { role: "user", content: userPrompt },
+      ],
     });
-    lesson = parseLesson(firstTextBlock(response.content));
+    lesson = parseLesson(response.choices[0]?.message?.content ?? "");
   } catch (err) {
-    logger.error("Lesson extraction (Claude) failed", {
+    logger.error("Lesson extraction (OpenAI) failed", {
       tagId,
       error: err instanceof Error ? err.message : String(err),
     });
@@ -104,7 +107,7 @@ Extract the generalized lesson as specified.`;
   return ruleId;
 }
 
-/** Parse and validate Claude's JSON lesson output. Throws on malformed output. */
+/** Parse and validate the model's JSON lesson output. Throws on malformed output. */
 export function parseLesson(raw: string): ExtractedLesson {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");

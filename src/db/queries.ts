@@ -18,9 +18,27 @@ export async function createCallRecord(record: CallRecord): Promise<void> {
     caller_number: record.caller_number,
     started_at: record.started_at,
     transcript: record.transcript ?? [],
+    realtime_session_id: record.realtime_session_id ?? null,
   });
   if (error) {
     logger.error("Failed to create call record", { callId: record.call_id, error: error.message });
+  }
+}
+
+/**
+ * Record the OpenAI Realtime session id on an existing call row (set once the realtime
+ * WebSocket session is established). Failure-tolerant: logs and continues.
+ */
+export async function setRealtimeSessionId(
+  callId: string,
+  realtimeSessionId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("calls")
+    .update({ realtime_session_id: realtimeSessionId })
+    .eq("call_id", callId);
+  if (error) {
+    logger.error("Failed to set realtime session id", { callId, error: error.message });
   }
 }
 

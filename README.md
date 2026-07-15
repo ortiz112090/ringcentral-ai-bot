@@ -1,23 +1,28 @@
 # RingCentral AI Voice Bot — SR22 Auto Insurance
 
-An AI voice agent that answers inbound RingCentral calls, runs an SR22 auto-insurance
-follow-up sales script (powered by Anthropic Claude), transcribes/synthesizes speech
-with OpenAI, and logs every call and lead to Supabase. Deployable to Render as a
-long-running web service.
+An AI voice agent that answers inbound RingCentral calls and runs an SR22 auto-insurance
+follow-up sales script using **OpenAI's GPT-4o Realtime API** (streaming speech-to-speech
+over WebSocket). Every call and lead is logged to Supabase. Deployable to Render as a
+long-running web service. OpenAI is the sole AI provider — there is no Anthropic/Claude
+dependency.
 
 ## What it does
 
 1. RingCentral sends an inbound-call webhook to this service.
-2. The bot answers the call and greets the caller using the SR22 follow-up script.
-3. Caller audio → OpenAI STT → text.
-4. Text + conversation state → Claude, which returns the next line to say **and** a
-   structured control block (current stage, close-attempt count, escalate flag,
-   captured lead fields, terminal outcome).
-5. Claude's line → OpenAI TTS → audio played back to the caller.
-6. On an escalation trigger (human requested, out-of-script question, or 5 failed
+2. The bot answers the call and opens a **GPT-4o Realtime** session for that call.
+3. Caller audio is streamed **into** the Realtime model as it arrives; the model's
+   spoken response audio is streamed **back out** to the caller as it arrives — no
+   waiting for a full turn (this is the latency win).
+4. The model tracks state via **tool/function calls** rather than a parsed control
+   block: `capture_lead_info`, `record_close_attempt`, `escalate_to_human`,
+   `set_call_outcome`.
+5. On an escalation trigger (human requested, out-of-script question, or 5 failed
    closes on an unclear situation) the call is transferred to a human queue extension.
-7. Every call outcome, transcript, and lead detail is written to Supabase — even if
+6. Every call outcome, transcript, and lead detail is written to Supabase — even if
    the AI errors mid-call, in which case the caller is safely escalated to a human.
+
+> **SMS path.** The optional inbound-SMS script still uses a non-streaming OpenAI **chat**
+> turn (text-in/text-out); only live voice uses the Realtime API.
 
 ## Architecture
 
@@ -25,16 +30,31 @@ long-running web service.
 Inbound call ──► RingCentral ──► POST /webhooks/ringcentral (Express)
                                         │
                                         ▼
-                                  callHandler (orchestrator)
-                     ┌──────────────┬──────────────┬───────────────┐
-                     ▼              ▼              ▼               ▼
-              OpenAI STT     Claude (script    OpenAI TTS     RingCentral
-             (speech→text)   state machine)   (text→speech)   Call Control
-                                     │                         (answer /
-                                     ▼                          transfer /
-                               Supabase (calls,                 play audio)
-                               leads, transcripts)
+                              audioBridge (per-call bridge)
+                                        │
+        caller audio ▲│ bot audio       │  answer / transfer / hang up
+                     │▼ (streamed)       ▼
+             OpenAI GPT-4o Realtime  ◄──►  RingCentral Call Control
+             (speech-to-speech WS)
+                     │  tool calls (capture_lead_info, record_close_attempt,
+                     ▼                  escalate_to_human, set_call_outcome)
+               Supabase (calls, leads, transcripts)
 ```
+
+### Why the change (latency)
+
+The previous pipeline was **sequential**: OpenAI Whisper STT → Anthropic Claude →
+OpenAI TTS, three round-trips per turn, measured/estimated at **~2–4s per turn**. The
+GPT-4o Realtime API collapses speech-recognition, reasoning, and speech-synthesis into a
+**single continuous stream** over one WebSocket, and audio is played back as it is
+generated instead of after the whole reply is ready. This overlaps the three stages and
+targets **~1–1.5s per conversational turn**.
+
+### Latency expectations
+
+A realistic **1–2s per turn** is achievable with this architecture. **Sub-1s is not
+guaranteed**: the phone network and RingCentral media relay add overhead on top of the
+model's own latency, and that leg is outside this service's control.
 
 ## File structure
 
@@ -48,21 +68,25 @@ ringcentral-ai-bot/
 ├── SETUP.md                    # Step-by-step RingCentral + Supabase + Render setup
 ├── supabase/
 │   └── migrations/
-│       └── 0001_init.sql        # calls, leads, call_transcripts tables + enums
+│       ├── 0001_init.sql        # calls, leads, call_transcripts tables + enums
+│       ├── 0002_learning_system.sql # training_calls, call_tags, learned_rules
+│       └── 0003_realtime_migration.sql # adds calls.realtime_session_id
 └── src/
     ├── index.ts                # Express entrypoint, startup + graceful shutdown
     ├── config.ts               # Env var loader (fails fast on missing secrets)
     ├── logger.ts               # Tiny JSON logger
-    ├── callHandler.ts          # Per-call orchestration (the "brain")
+    ├── callHandler.ts          # Call state + DB logging + SMS text-turn path
     ├── ai/
-    │   ├── systemPrompt.ts     # Builds Claude system prompt from the sales script (+ approved lessons)
-    │   ├── conversation.ts     # Claude call + JSON control-block parsing
-    │   ├── anthropicClient.ts  # Shared Anthropic client (reused by conversation + learning)
+    │   ├── systemPrompt.ts     # Builds sales-script prompt/instructions (+ approved lessons)
+    │   ├── realtimeEngine.ts   # GPT-4o Realtime WebSocket engine (voice, tools, streaming)
+    │   ├── conversation.ts     # OpenAI chat turn + JSON control-block parsing (SMS path)
+    │   ├── openaiClient.ts     # Shared OpenAI client (realtime, chat, speech, embeddings)
     │   └── retrieval.ts        # Learning system: fetch + format approved lessons at call time
     ├── speech/
     │   └── openai.ts           # OpenAI STT (transcribe) + TTS (synthesize) + embeddings
     ├── ringcentral/
     │   ├── client.ts           # RingCentral SDK JWT auth + REST helpers
+    │   ├── audioBridge.ts      # Per-call bidirectional audio bridge (RC ↔ Realtime)
     │   └── telephony.ts        # Answer / transfer / play audio / SMS / subscription
     ├── db/
     │   ├── supabase.ts         # Supabase service-role client
@@ -72,7 +96,7 @@ ringcentral-ai-bot/
     ├── learning/
     │   ├── ingest.ts           # Ingest audio (STT) or text transcript into training_calls
     │   ├── tagging.ts          # Create call_tags (mark good/bad moments)
-    │   ├── extractLessons.ts   # Claude distills a tag into a pending learned_rule
+    │   ├── extractLessons.ts   # OpenAI chat distills a tag into a pending learned_rule
     │   ├── review.ts           # Approve/reject queue (reusable, dashboard-ready)
     │   └── cli.ts              # ingest / tag / review CLI (npm run learn:*)
     ├── routes/
@@ -84,8 +108,11 @@ ringcentral-ai-bot/
 
 ## Sales script & safety rules
 
-The full decision tree lives in `../sales_script_flow.md` and is compiled into
-Claude's system prompt in `src/ai/systemPrompt.ts`. Key encoded rules:
+The full decision tree lives in `../sales_script_flow.md` and is compiled — by the same
+`src/ai/systemPrompt.ts` module — into the Realtime session `instructions` for live calls
+(`buildRealtimeInstructions`) and into the OpenAI chat system prompt for the SMS path
+(`buildSystemPrompt`). Identical business rules; only the delivery format differs. Key
+encoded rules:
 
 - **Never run an MVR** (Motor Vehicle Record) check under any circumstances.
 - **5-attempt close discipline**, in order: initial offer → split payment → shop other
@@ -99,15 +126,15 @@ Claude's system prompt in `src/ai/systemPrompt.ts`. Key encoded rules:
 
 The bot improves its rebuttal/response handling by learning from real example calls —
 **without ever fine-tuning a model**. Instead of retraining, we store human-approved
-"lessons" and inject the relevant ones into Claude's system prompt at call time as
-supplementary few-shot guidance. This keeps the core sales script fixed and every
-behavior change human-reviewed.
+"lessons" and inject the relevant ones into the model's prompt/instructions at call time
+as supplementary few-shot guidance (Realtime `instructions` for voice, chat system prompt
+for SMS). This keeps the core sales script fixed and every behavior change human-reviewed.
 
 ### Data flow
 
 ```
 ingest ──► tag ──► extract lesson ──► review/approve ──► retrieve at call time
-(audio/    (mark    (Claude distills   (human approves    (top-N approved lessons
+(audio/    (mark    (OpenAI distills   (human approves    (top-N approved lessons
  text →     good/    a general,         via CLI; only      injected into the system
  training_  bad       reusable rule →   approved rules      prompt, labeled as
  calls)     moment)   learned_rules,    go live)            "Lessons from past calls")
@@ -119,15 +146,16 @@ ingest ──► tag ──► extract lesson ──► review/approve ──►
 2. **Tag** — `npm run learn:tag` prints the transcript and lets you mark segments as
    good/bad examples of a category (e.g. `objection_shopping`, `closing`), creating
    `call_tags` rows and immediately extracting a lesson from each.
-3. **Extract** — Claude turns a tagged moment into a generalized `learned_rule`
-   (situation → recommended response, plus what to avoid for bad examples), stored as
-   `pending_review`.
+3. **Extract** — an OpenAI chat model turns a tagged moment into a generalized
+   `learned_rule` (situation → recommended response, plus what to avoid for bad
+   examples), stored as `pending_review`.
 4. **Review** — `npm run learn:review` walks pending lessons so you approve or reject
    each. Nothing is used live until approved.
-5. **Retrieve** — during a live call, `src/ai/retrieval.ts` fetches the top-N relevant
-   **approved** lessons and `buildSystemPrompt` appends them as clearly-labeled
-   supplementary guidance. This is strictly additive and wrapped in try/catch: if
-   retrieval finds nothing or errors, the bot runs the core script unchanged.
+5. **Retrieve** — `src/ai/retrieval.ts` fetches the top-N relevant **approved** lessons
+   and they are appended as clearly-labeled supplementary guidance — into the Realtime
+   session `instructions` at session start for live calls, or into the chat system prompt
+   for the SMS path. This is strictly additive and wrapped in try/catch: if retrieval
+   finds nothing or errors, the bot runs the core script unchanged.
 
 ### Retrieval: pgvector or category fallback
 
@@ -164,11 +192,19 @@ See **SETUP.md** for full RingCentral, Supabase, and Render deployment steps.
 
 ## Notes on media transport
 
-Call Control (answer / transfer / play) is fully wired. Streaming the caller's live
-audio to STT and pushing TTS bytes back is account/media-package dependent on
-RingCentral; `src/ringcentral/telephony.ts` documents exactly where the generated
-audio URL is handed to the `play` endpoint, and `processCallerAudio()` in
-`src/routes/webhooks.ts` is the single entry point for a captured audio turn.
+Call Control (answer / transfer / hang up) is fully wired and works on any Call
+Control-enabled account. The **bidirectional live media stream** the Realtime bridge
+needs — raw caller audio in, bot audio out — is **account/media-package dependent** on
+RingCentral and cannot be fully verified from this environment. It is **not** a simple
+public websocket like Twilio Media Streams; depending on your product it may come via
+RingCentral's media streaming / audio-stream APIs or a SIP/WebRTC media path.
+
+The bridge is therefore transport-agnostic (`src/ringcentral/audioBridge.ts`): the media
+layer calls `onCallerAudioChunk(sessionId, base64)` for inbound audio and registers an
+outbound sink via `registerBotAudioSink(sessionId, sink)` (both re-exported from
+`src/routes/webhooks.ts`). Audio uses `OPENAI_REALTIME_AUDIO_FORMAT` (default
+`g711_ulaw`, telephony-native) to avoid resampling; transcode at that boundary if your
+media feed differs. See the extended caveat comment at the top of `audioBridge.ts`.
 
 ## Future work (out of scope for v1)
 

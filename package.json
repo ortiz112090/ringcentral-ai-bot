@@ -1,7 +1,7 @@
 {
   "name": "ringcentral-ai-bot",
   "version": "1.0.0",
-  "description": "AI voice agent that answers inbound RingCentral calls, runs an SR22 auto-insurance sales script via Claude, with OpenAI STT/TTS and Supabase logging.",
+  "description": "AI voice agent that answers inbound RingCentral calls and runs an SR22 auto-insurance sales script via OpenAI's GPT-4o Realtime API (streaming speech-to-speech), with Supabase logging.",
   "main": "dist/index.js",
   "engines": {
     "node": ">=20"
@@ -16,15 +16,16 @@
     "learn:review": "node dist/learning/cli.js review"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
     "@ringcentral/sdk": "^5.0.4",
     "@supabase/supabase-js": "^2.45.4",
     "express": "^4.21.1",
-    "openai": "^4.67.3"
+    "openai": "^4.67.3",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.16.11",
+    "@types/ws": "^8.5.12",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.6.3"
   }

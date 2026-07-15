@@ -11,7 +11,7 @@ export interface CallState {
   callId: string;
   callerNumber: string | null;
   lead: LeadRecord | null;
-  history: ChatTurn[]; // Claude message history (caller = user, bot = assistant)
+  history: ChatTurn[]; // chat history for the text path (caller = user, bot = assistant)
   transcript: TranscriptTurn[]; // human-readable turn log for QA
   stage: string;
   closeAttempts: number;
@@ -51,7 +51,7 @@ export function recordCallerTurn(state: CallState, text: string): void {
 
 export function recordBotTurn(state: CallState, text: string): void {
   const ts = new Date().toISOString();
-  // We store only the spoken line back to Claude as assistant context (not the JSON),
+  // We store only the spoken line as assistant context (not the JSON control block),
   // keeping history clean and token-cheap.
   state.history.push({ role: "assistant", content: text });
   state.transcript.push({ role: "bot", text, timestamp: ts });

@@ -122,7 +122,7 @@ async function runTag(argv: string[]): Promise<void> {
         console.error("Failed to save tag — check logs.");
         continue;
       }
-      console.log(`Saved tag #${tagId}. Extracting lesson with Claude...`);
+      console.log(`Saved tag #${tagId}. Extracting lesson with OpenAI...`);
       const ruleId = await extractLesson(tagId);
       console.log(
         ruleId != null

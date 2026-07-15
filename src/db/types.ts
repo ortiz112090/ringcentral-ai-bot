@@ -35,6 +35,8 @@ export interface CallRecord {
   outcome?: CallOutcome | null;
   script_stage_reached?: string | null;
   transcript?: TranscriptTurn[] | null;
+  // OpenAI Realtime API session id for live speech-to-speech calls (see 0003 migration).
+  realtime_session_id?: string | null;
 }
 
 export interface LeadRecord {

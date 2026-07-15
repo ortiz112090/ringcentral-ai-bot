@@ -8,7 +8,9 @@ time: ~45 minutes.
 ## 0. Prerequisites
 
 - Node.js 20+ and npm.
-- Accounts/keys for: RingCentral (with a phone number), Anthropic, OpenAI, Supabase.
+- Accounts/keys for: RingCentral (with a phone number), OpenAI, Supabase.
+- **OpenAI Realtime API access** on your OpenAI account (the GPT-4o Realtime model must
+  be available to your key) — this powers the live voice pipeline.
 - A GitHub repo (you'll push this project and connect it to Render).
 
 ---
@@ -25,11 +27,13 @@ The Supabase project (**ref `hawjzggkndvxylzxvwvx`**) is currently **paused**.
 3. Run the schema. Either:
    - **SQL editor:** open `supabase/migrations/0001_init.sql`, paste it into the
      Supabase SQL editor, and run it, then do the same with
-     `supabase/migrations/0002_learning_system.sql`; **or**
+     `supabase/migrations/0002_learning_system.sql` and
+     `supabase/migrations/0003_realtime_migration.sql`; **or**
    - **CLI:** `supabase link --project-ref hawjzggkndvxylzxvwvx && supabase db push`
-     (applies both migrations in order).
+     (applies all migrations in order).
 4. Confirm the tables now exist: `calls`, `leads`, `call_transcripts` (from 0001) and
-   `training_calls`, `call_tags`, `learned_rules` (from 0002).
+   `training_calls`, `call_tags`, `learned_rules` (from 0002). Migration 0003 adds the
+   `calls.realtime_session_id` column (additive; no data change).
 
 > The `leads.license_number` column holds sensitive PII. It's collected only for
 > quoting and is **never** used to run an MVR. Consider Supabase Vault / pgcrypto
@@ -90,11 +94,19 @@ cp .env.example .env
 | `RINGCENTRAL_JWT` | JWT credential you created |
 | `ESCALATION_QUEUE_EXTENSION` | your human queue extension |
 | `RINGCENTRAL_WEBHOOK_VERIFICATION_TOKEN` | any random string you choose |
-| `ANTHROPIC_API_KEY` | Anthropic console |
-| `OPENAI_API_KEY` | OpenAI dashboard |
+| `OPENAI_API_KEY` | OpenAI dashboard (must have Realtime API access) |
+| `OPENAI_REALTIME_MODEL` | defaults to `gpt-4o-realtime-preview`; override if OpenAI ships a newer realtime model |
+| `OPENAI_REALTIME_VOICE` | realtime voice — see note below (defaults to `alloy`) |
+| `OPENAI_REALTIME_AUDIO_FORMAT` | audio codec, defaults to `g711_ulaw` (telephony-native) |
+| `OPENAI_CHAT_MODEL` | chat model for SMS + lesson extraction (defaults to `gpt-4o`) |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | step 1 |
 | `AGENT_NAME` / `BROKERAGE_NAME` | your agent's display name + brokerage |
 | `PUBLIC_BASE_URL` | your deployed Render URL (set after step 5) |
+
+> **Choosing `OPENAI_REALTIME_VOICE`.** The Realtime API offers several voices (e.g.
+> `alloy`, `echo`, `shimmer`, `ash`, `ballad`, `coral`, `sage`, `verse`). Pick one that
+> fits your brand — `alloy` is a neutral default. It only affects how the bot *sounds*,
+> not what it says. Change it and redeploy to try another.
 
 ---
 
@@ -210,8 +222,8 @@ npm run learn:tag -- --call 12
 
 This prints the transcript turn-by-turn, then interactively asks you to mark segments
 as good/bad examples with a category (e.g. `objection_shopping`, `closing`, `rapport`).
-Each tag immediately calls Claude to distill a generalized lesson into `learned_rules`
-with status `pending_review`.
+Each tag immediately calls an OpenAI chat model to distill a generalized lesson into
+`learned_rules` with status `pending_review`.
 
 ### c. Review the approval queue
 
@@ -233,7 +245,13 @@ the next call automatically — no redeploy needed.
   value used when the subscription was created (redeploy to recreate).
 - **Supabase errors in logs:** the project is probably still paused, or the
   service-role key is wrong.
-- **Bot always escalates:** check `ANTHROPIC_API_KEY` — the engine falls back to a
-  safe human transfer whenever Claude errors or returns unparseable output.
+- **Bot always escalates:** check `OPENAI_API_KEY` and that your account has Realtime
+  API access — the bridge falls back to a safe human transfer whenever the Realtime
+  WebSocket fails to connect or the model errors mid-call.
+- **Call answers but there's silence / no bot audio:** the live media stream is not
+  wired. Call Control alone can't stream raw audio — you must connect your RingCentral
+  account's media stream to the bridge (`onCallerAudioChunk` / `registerBotAudioSink`,
+  see README "Notes on media transport" and `src/ringcentral/audioBridge.ts`). Watch the
+  logs for the "no RingCentral media sink attached" warning.
 - **RingCentral login fails on boot:** verify the JWT and that the app uses the JWT
   auth flow; the service stays up (health passes) so you can fix creds and redeploy.

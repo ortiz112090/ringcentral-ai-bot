@@ -2,13 +2,14 @@ import { Router, Request, Response } from "express";
 import { config } from "../config";
 import { logger } from "../logger";
 import { answerCall } from "../ringcentral/telephony";
+import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
 import {
-  escalateCall,
-  handleCallerUtterance,
-  onCallEnded,
-  onCallStarted,
-} from "../callHandler";
-import { transcribeAudio } from "../speech/openai";
+  attachMediaSink,
+  endCallBridge,
+  MediaSink,
+  pushCallerAudio,
+  startCallBridge,
+} from "../ringcentral/audioBridge";
 
 /**
  * RingCentral webhook receiver.
@@ -84,11 +85,14 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
     if (direction !== "Inbound") continue;
 
     if (status === "Setup" || status === "Proceeding") {
-      // New inbound call — answer it and initialize conversation state.
+      // New inbound call — answer it and open the GPT-4o Realtime speech-to-speech
+      // bridge. The bridge creates call state + the DB record and streams audio both
+      // ways for the life of the call (see src/ringcentral/audioBridge.ts).
       await answerCall(sessionId, partyId);
-      await onCallStarted(sessionId, callerNumber);
-      logger.info("Inbound call answered", { sessionId, callerNumber });
+      await startCallBridge(sessionId, partyId, callerNumber);
+      logger.info("Inbound call answered (realtime bridge)", { sessionId, callerNumber });
     } else if (status === "Disconnected") {
+      endCallBridge(sessionId);
       await onCallEnded(sessionId);
       logger.info("Call disconnected", { sessionId });
     }
@@ -96,9 +100,9 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
 }
 
 /**
- * Optional text-based version of the script over SMS (stretch goal). Runs the same
- * Claude conversation engine but skips STT/TTS — inbound SMS text goes straight in,
- * and the bot's reply is sent back as an SMS.
+ * Optional text-based version of the script over SMS (stretch goal). Runs the OpenAI
+ * chat conversation engine (getBotDecision) — inbound SMS text goes straight in, and
+ * the bot's reply is sent back as an SMS. (Live voice calls use the Realtime engine.)
  */
 async function handleSmsEvent(messageBody: any): Promise<void> {
   if (!messageBody || messageBody.direction !== "Inbound") return;
@@ -117,22 +121,21 @@ async function handleSmsEvent(messageBody: any): Promise<void> {
 }
 
 /**
- * Exposed for the media pipeline: when caller audio has been captured for a turn,
- * transcribe it, run the conversation, and hand back the synthesized reply +
- * whether to transfer. The RingCentral media layer calls this per utterance.
+ * Media-pipeline entry points for the live Realtime voice bridge.
+ *
+ * The RingCentral media layer (whatever streaming transport your account exposes — see
+ * the caveat in src/ringcentral/audioBridge.ts) must:
+ *   1. call `onCallerAudioChunk(sessionId, base64)` for each inbound audio chunk it
+ *      receives from the caller, and
+ *   2. register an outbound sink via `registerBotAudioSink(sessionId, sink)` so the
+ *      model's streamed audio is written back to the caller.
+ * Audio is in `config.openai.realtimeAudioFormat` (default g711_ulaw); transcode at this
+ * boundary if your media feed uses a different codec/sample rate.
  */
-export async function processCallerAudio(
-  sessionId: string,
-  partyId: string,
-  audio: Buffer
-): Promise<{ audio: Buffer | null; text: string }> {
-  const callerText = await transcribeAudio(audio);
-  if (!callerText) {
-    return { audio: null, text: "" };
-  }
-  const result = await handleCallerUtterance(sessionId, callerText);
-  if (result.shouldTransfer) {
-    await escalateCall(sessionId, sessionId, partyId);
-  }
-  return { audio: result.audio, text: result.text };
+export function onCallerAudioChunk(sessionId: string, base64Audio: string): void {
+  pushCallerAudio(sessionId, base64Audio);
+}
+
+export function registerBotAudioSink(sessionId: string, sink: MediaSink): void {
+  attachMediaSink(sessionId, sink);
 }

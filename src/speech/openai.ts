@@ -1,8 +1,7 @@
-import OpenAI, { toFile } from "openai";
+import { toFile } from "openai";
 import { config } from "../config";
 import { logger } from "../logger";
-
-const client = new OpenAI({ apiKey: config.openai.apiKey });
+import { openai as client } from "../ai/openaiClient";
 
 /**
  * Speech-to-text. Takes raw caller audio bytes (e.g. a wav/mp3 chunk pulled from

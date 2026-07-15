@@ -31,12 +31,18 @@ services:
         sync: false
       - key: RINGCENTRAL_WEBHOOK_VERIFICATION_TOKEN
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: ANTHROPIC_MODEL
-        value: claude-sonnet-4-6
       - key: OPENAI_API_KEY
         sync: false
+      # Chat model for the SMS text path + learning lesson extraction.
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4o
+      # ---- Realtime (live voice) speech-to-speech pipeline ----
+      - key: OPENAI_REALTIME_MODEL
+        value: gpt-4o-realtime-preview
+      - key: OPENAI_REALTIME_VOICE
+        value: alloy
+      - key: OPENAI_REALTIME_AUDIO_FORMAT
+        value: g711_ulaw
       - key: OPENAI_STT_MODEL
         value: gpt-4o-transcribe
       - key: OPENAI_TTS_MODEL

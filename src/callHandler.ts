@@ -20,11 +20,13 @@ import { CallOutcome } from "./db/types";
 
 /**
  * Orchestrates a single call: initializes state on answer, processes each caller
- * utterance through Claude, synthesizes the reply, and escalates/finalizes as needed.
+ * utterance, and escalates/finalizes as needed.
  *
- * Media transport (getting caller audio in and TTS audio out) is owned by the
- * RingCentral layer; this module is the brain that decides WHAT to say and when to
- * transfer or hang up. It never throws — any failure results in a safe escalation.
+ * NOTE: live phone calls now run through the GPT-4o Realtime speech-to-speech engine
+ * (see src/ai/realtimeEngine.ts + src/ringcentral/audioBridge.ts). The text turn path
+ * below (getBotDecision → OpenAI chat → TTS) is retained for the SMS script. Both share
+ * the same call-state, DB logging, and safe-escalation conventions. It never throws —
+ * any failure results in a safe escalation.
  */
 
 export interface TurnResult {
@@ -78,7 +80,7 @@ export async function handleCallerUtterance(
     recordCallerTurn(state, callerText);
     const decision = await getBotDecision(state.lead, state.history);
 
-    // Persist any lead fields Claude captured this turn.
+    // Persist any lead fields the model captured this turn.
     if (Object.keys(decision.lead_updates).length > 0 && state.callerNumber) {
       await upsertLead({
         phone_number: state.callerNumber,
@@ -150,9 +152,11 @@ export async function escalateCall(
   }
 }
 
-// ---- internals ----
-
-async function wrapUp(state: CallState, outcome: CallOutcome): Promise<void> {
+/**
+ * Finalize a call: persist outcome + transcript and clear in-memory state. Exported so
+ * the realtime audio bridge can finalize live calls the same way the text path does.
+ */
+export async function wrapUpCall(state: CallState, outcome: CallOutcome): Promise<void> {
   await finalizeCallRecord(state.callId, {
     outcome,
     scriptStageReached: state.stage,
@@ -161,6 +165,12 @@ async function wrapUp(state: CallState, outcome: CallOutcome): Promise<void> {
   });
   endCallState(state.callId);
   logger.info("Call finalized", { callId: state.callId, outcome, stage: state.stage });
+}
+
+// ---- internals ----
+
+async function wrapUp(state: CallState, outcome: CallOutcome): Promise<void> {
+  await wrapUpCall(state, outcome);
 }
 
 async function safeSynthesize(text: string): Promise<Buffer | null> {
