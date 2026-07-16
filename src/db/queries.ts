@@ -13,17 +13,84 @@ import {
  * We log the error and continue — a dropped log row is far cheaper than a dropped call.
  */
 
+/**
+ * Phase 1 of the two-phase call write: insert the row at CALL START with
+ * ended_at left NULL so the dashboard shows a live (in-progress) call.
+ *
+ * Uses upsert with ignoreDuplicates on the call_id primary key so a retried or
+ * duplicated webhook "call started" event never creates a second row AND never
+ * clobbers an already-in-progress row (its transcript/started_at are preserved).
+ */
 export async function createCallRecord(record: CallRecord): Promise<void> {
-  const { error } = await supabase.from("calls").insert({
-    bot_id: BOT_ID,
-    call_id: record.call_id,
-    caller_number: record.caller_number,
-    started_at: record.started_at,
-    transcript: record.transcript ?? [],
-    realtime_session_id: record.realtime_session_id ?? null,
-  });
+  const { error } = await supabase.from("calls").upsert(
+    {
+      bot_id: BOT_ID,
+      call_id: record.call_id,
+      caller_number: record.caller_number,
+      started_at: record.started_at,
+      ended_at: null,
+      transcript: record.transcript ?? [],
+      realtime_session_id: record.realtime_session_id ?? null,
+    },
+    { onConflict: "call_id", ignoreDuplicates: true }
+  );
   if (error) {
     logger.error("Failed to create call record", { callId: record.call_id, error: error.message });
+  }
+}
+
+/**
+ * Insert a single conversation turn into call_transcripts as it completes, so the
+ * dashboard can stream the transcript live. turn_index is sequential per call
+ * (0-based, matching the in-memory transcript array position). Failure-tolerant:
+ * a dropped turn is logged and never interrupts the live call — the authoritative
+ * full transcript is still written to calls.transcript at call end.
+ */
+export async function insertCallTranscriptTurn(turn: {
+  callId: string;
+  turnIndex: number;
+  speaker: TranscriptTurn["role"];
+  text: string;
+}): Promise<void> {
+  const { error } = await supabase.from("call_transcripts").insert({
+    bot_id: BOT_ID,
+    call_id: turn.callId,
+    turn_index: turn.turnIndex,
+    speaker: turn.speaker,
+    text: turn.text,
+  });
+  if (error) {
+    logger.error("Failed to insert transcript turn", {
+      callId: turn.callId,
+      turnIndex: turn.turnIndex,
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Safety net for "ghost live calls": if a call-end update never ran (process
+ * crash/restart mid-call), its row stays ended_at NULL forever and the dashboard
+ * shows it as perpetually live. On startup we close out this tenant's stale rows
+ * — ended_at NULL and started_at older than the threshold — as 'abandoned'.
+ */
+export async function closeStaleLiveCalls(
+  olderThanMs: number = 2 * 60 * 60 * 1000
+): Promise<void> {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  const { data, error } = await supabase
+    .from("calls")
+    .update({ outcome: "abandoned", ended_at: new Date().toISOString() })
+    .eq("bot_id", BOT_ID)
+    .is("ended_at", null)
+    .lt("started_at", cutoff)
+    .select("call_id");
+  if (error) {
+    logger.error("Failed to close stale live calls", { error: error.message });
+    return;
+  }
+  if (data && data.length > 0) {
+    logger.info("Closed stale live calls on startup", { count: data.length });
   }
 }
 

@@ -6,6 +6,7 @@ import { webhookRouter } from "./routes/webhooks";
 import { ensureLogin } from "./ringcentral/client";
 import { ensureWebhookSubscription } from "./ringcentral/telephony";
 import { loadRemoteConfig } from "./db/remoteConfig";
+import { closeStaleLiveCalls } from "./db/queries";
 
 async function main(): Promise<void> {
   const app = express();
@@ -47,6 +48,10 @@ async function main(): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+
+  // Close out any "ghost live calls" left with ended_at NULL by a prior crash/
+  // restart, so the dashboard's LIVE view isn't stuck. Non-fatal.
+  await closeStaleLiveCalls();
 
   // Authenticate to RingCentral and (re)establish the webhook subscription.
   // Failures here are logged but non-fatal — the health check must still pass so
