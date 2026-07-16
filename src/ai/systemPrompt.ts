@@ -1,6 +1,22 @@
 import { config } from "../config";
 import { LeadRecord, LearnedRule } from "../db/types";
 import { formatLessonsForPrompt } from "./retrieval";
+import { getRemoteConfig } from "../db/remoteConfig";
+
+/**
+ * If Supabase supplied a non-empty `bot_config.compiled_instructions`, it is an
+ * admin-authored prompt that OVERRIDES the locally-built script. Approved
+ * learning-system lessons are still appended additively (same invariant as the
+ * local builders). Returns null when there is no override, so callers fall back
+ * to the locally-built prompt.
+ */
+function compiledInstructionsOverride(lessons: LearnedRule[]): string | null {
+  const compiled = getRemoteConfig().botConfig?.compiled_instructions;
+  if (compiled && compiled.trim() !== "") {
+    return `${compiled}${formatLessonsForPrompt(lessons)}`;
+  }
+  return null;
+}
 
 /**
  * Builds the OpenAI chat system prompt from the SR22 sales script
@@ -20,6 +36,9 @@ export function buildSystemPrompt(
   lead: LeadRecord | null,
   lessons: LearnedRule[] = []
 ): string {
+  const override = compiledInstructionsOverride(lessons);
+  if (override) return override;
+
   const agentName = config.business.agentName;
   const brokerage = config.business.brokerageName;
 
@@ -118,6 +137,9 @@ export function buildRealtimeInstructions(
   lead: LeadRecord | null,
   lessons: LearnedRule[] = []
 ): string {
+  const override = compiledInstructionsOverride(lessons);
+  if (override) return override;
+
   const agentName = config.business.agentName;
   const brokerage = config.business.brokerageName;
 

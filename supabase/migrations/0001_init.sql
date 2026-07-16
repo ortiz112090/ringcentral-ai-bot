@@ -1,6 +1,6 @@
 -- SR22 AI Voice Bot — initial schema
 -- Run in the Supabase SQL editor, or via `supabase db push` with the CLI.
--- NOTE: Supabase project ref hawjzggkndvxylzxvwvx must be RESUMED (unpaused) first.
+-- NOTE: Supabase project ref hiqyfprmtipgrvwadqdb must be RESUMED (unpaused) first.
 
 -- ---------- Enums ----------
 do $$
