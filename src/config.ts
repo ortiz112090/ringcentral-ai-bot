@@ -12,6 +12,14 @@
 // cycle (config -> remoteConfig -> supabase -> config). The runtime helpers are
 // required lazily inside resolveEffectiveConfig() instead.
 import type { BotConfigRow } from "./db/remoteConfig";
+import { logger } from "./logger";
+
+/**
+ * The primary/default bot tenant. Only this tenant is allowed to fall back to
+ * plain env vars for credential fields; every other tenant must source its
+ * credentials exclusively from Supabase (see resolveEffectiveConfig).
+ */
+const PRIMARY_BOT_ID = "00000000-0000-0000-0000-000000000001";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -138,32 +146,59 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
   const {
     getRemoteConfig,
     getCredential,
+    BOT_ID,
   } = require("./db/remoteConfig") as typeof import("./db/remoteConfig");
 
   const botConfig: BotConfigRow | null = getRemoteConfig().botConfig;
 
+  // Credential isolation: only the primary tenant may fall back to plain env vars
+  // for credentials. For any other BOT_ID we ignore env vars entirely for these
+  // fields and treat a missing Supabase value as genuinely absent, so one tenant's
+  // deployment can never silently inherit another's env-provided secrets.
+  const isPrimaryBot = BOT_ID === PRIMARY_BOT_ID;
+
+  /**
+   * Env-first merge for a CREDENTIAL field. Primary bot: identical to envFirst.
+   * Non-primary bot: env vars are disabled — return only the (trimmed, non-empty)
+   * Supabase value, and warn (no secret values) when env fallback was suppressed.
+   */
+  const credentialFirst = (
+    envName: string,
+    remoteValue: string | null | undefined
+  ): string | undefined => {
+    if (isPrimaryBot) return envFirst(envName, remoteValue);
+    const remote = remoteValue && remoteValue.trim() !== "" ? remoteValue : undefined;
+    if (remote === undefined && envValue(envName) !== undefined) {
+      logger.warn(
+        "Env credential fallback disabled for non-primary tenant; treating credential as absent",
+        { botId: BOT_ID, field: envName }
+      );
+    }
+    return remote;
+  };
+
   return {
     ringcentral: {
-      clientId: envFirst("RINGCENTRAL_CLIENT_ID", getCredential("ringcentral", "client_id")),
-      clientSecret: envFirst(
+      clientId: credentialFirst("RINGCENTRAL_CLIENT_ID", getCredential("ringcentral", "client_id")),
+      clientSecret: credentialFirst(
         "RINGCENTRAL_CLIENT_SECRET",
         getCredential("ringcentral", "client_secret")
       ),
       serverUrl:
         envFirst("RINGCENTRAL_SERVER_URL", getCredential("ringcentral", "server_url")) ??
         "https://platform.ringcentral.com",
-      jwt: envFirst("RINGCENTRAL_JWT", getCredential("ringcentral", "jwt")),
+      jwt: credentialFirst("RINGCENTRAL_JWT", getCredential("ringcentral", "jwt")),
       escalationExtension: envFirst(
         "ESCALATION_QUEUE_EXTENSION",
         botConfig?.escalation_extension
       ),
     },
     openai: {
-      apiKey: envFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
+      apiKey: credentialFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
     },
     business: {
-      agentName: envFirst("AGENT_NAME", botConfig?.agent_name) ?? "Alex",
-      brokerageName: envFirst("BROKERAGE_NAME", botConfig?.brokerage_name) ?? "our brokerage",
+      agentName: credentialFirst("AGENT_NAME", botConfig?.agent_name) ?? "Alex",
+      brokerageName: credentialFirst("BROKERAGE_NAME", botConfig?.brokerage_name) ?? "our brokerage",
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",

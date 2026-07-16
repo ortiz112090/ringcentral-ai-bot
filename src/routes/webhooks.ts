@@ -3,7 +3,7 @@ import { config, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { answerCall, transferToHuman } from "../ringcentral/telephony";
 import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
-import { isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
+import { getRemoteConfig, isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import {
   attachMediaSink,
   endCallBridge,
@@ -68,6 +68,54 @@ async function routeNotification(body: any): Promise<void> {
 }
 
 /**
+ * Normalize a phone number for tenant-routing comparison: strip everything except
+ * digits, then drop a leading US "1" country code so that "+1 (555) 010-1234",
+ * "15550101234", and "5550101234" all compare equal. Returns "" for null/blank.
+ */
+function normalizePhoneNumber(value: string | null | undefined): string {
+  if (!value) return "";
+  let digits = value.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    digits = digits.slice(1);
+  }
+  return digits;
+}
+
+/**
+ * Decide whether an inbound call's destination belongs to THIS tenant, based on
+ * the dashboard-assigned `bot_config.rc_main_number` / `rc_extension`.
+ *
+ * Fail-open: if this tenant has neither a main number nor an extension configured,
+ * we can't route by destination, so we accept the call (preserves legacy
+ * single-number deployments). If at least one is set, the call must match it.
+ *
+ * Extension matching is best-effort: RingCentral telephony party payloads do not
+ * reliably expose the dialed extension on the `to` party, so when no extension
+ * field is present on the destination we fall back to main-number matching only.
+ */
+function callDestinationMatchesTenant(party: any): boolean {
+  const botConfig = getRemoteConfig().botConfig;
+  const configuredNumber = normalizePhoneNumber(botConfig?.rc_main_number);
+  const configuredExtension = (botConfig?.rc_extension ?? "").trim();
+
+  // Fail-open: nothing configured to route on.
+  if (!configuredNumber && !configuredExtension) return true;
+
+  const destNumber = normalizePhoneNumber(party?.to?.phoneNumber);
+  // Best-effort: `extensionNumber` may be absent on the `to` party; when it is,
+  // destExtension is "" and extension matching is skipped in favor of the number.
+  const destExtension = (party?.to?.extensionNumber ?? "").toString().trim();
+
+  if (configuredNumber && destNumber && destNumber === configuredNumber) {
+    return true;
+  }
+  if (configuredExtension && destExtension && destExtension === configuredExtension) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Handle a telephony session notification. RingCentral sends the full session
  * with a `parties` array; we act on the inbound caller party's status.
  */
@@ -91,6 +139,20 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
       // effect on the very next call without a redeploy. Non-fatal on failure —
       // loadRemoteConfig keeps the last-known-good cache and isBotEnabled fails open.
       await loadRemoteConfig();
+
+      // Tenant number/extension routing: this bot subscription may receive calls
+      // for numbers that belong to a different tenant. Using the just-reloaded
+      // config, only proceed when the call's destination matches this tenant's
+      // assigned rc_main_number/rc_extension. Fail-open when neither is set.
+      if (!callDestinationMatchesTenant(party)) {
+        logger.info("Inbound call destination not assigned to this tenant; skipping", {
+          sessionId,
+          callerNumber,
+          toNumber: party?.to?.phoneNumber ?? null,
+          toExtension: party?.to?.extensionNumber ?? null,
+        });
+        continue;
+      }
 
       // Kill switch: disabled when the tenant's bots row is missing/inactive or
       // bot_config.bot_enabled is false (see isBotEnabled). When disabled, hand the
