@@ -17,6 +17,9 @@ create trigger trg_bot_config_updated_at
 -- ---- Grants ------------------------------------------------
 grant select                         on public.bot_config to authenticated;
 grant select, insert, update, delete on public.bot_config to service_role;
+-- Supabase auto-grants broad DML to authenticated on new public tables;
+-- revoke writes so table-level privilege matches the admin-only RLS policy.
+revoke insert, update, delete, truncate, references, trigger on public.bot_config from authenticated;
 
 -- ---- RLS ---------------------------------------------------
 alter table public.bot_config enable row level security;

@@ -44,6 +44,9 @@ create trigger trg_api_credentials_updated_at
 -- RLS governs row access; grants govern table-level privilege.
 grant select                         on public.api_credentials to authenticated;
 grant select, insert, update, delete on public.api_credentials to service_role;
+-- Supabase auto-grants broad DML to authenticated on new public tables;
+-- revoke writes so table-level privilege matches the admin-only RLS policy.
+revoke insert, update, delete, truncate, references, trigger on public.api_credentials from authenticated;
 
 -- ---- RLS ---------------------------------------------------
 alter table public.api_credentials enable row level security;
