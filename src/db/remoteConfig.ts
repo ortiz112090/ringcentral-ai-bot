@@ -1,11 +1,19 @@
 /**
- * Supabase-backed dynamic config loader.
+ * Supabase-backed dynamic config loader (MULTI-TENANT).
  *
- * Loads the single `bot_config` row (id=1) and all `api_credentials` rows at
- * startup, caching the last successful result in memory. This is a *fallback*
- * source: env vars always win (see resolveEffectiveConfig in ../config). Any
- * failure here (missing table, network error, paused project) is swallowed and
- * logged WITHOUT secret values so the bot still boots on env vars alone.
+ * Every deployment of this bot is ONE tenant, identified by the required `BOT_ID`
+ * env var (a uuid). All reads/writes are scoped to `bot_id = BOT_ID`; the bot
+ * never touches other tenants' rows and never creates/alters tables (schema is
+ * owned by the dashboard side).
+ *
+ * loadRemoteConfig() fetches this tenant's `bots` row, its `bot_config` row
+ * (keyed by bot_id), and its `api_credentials` rows, caching the last successful
+ * result in memory. It is cheap enough to call at the start of every call so
+ * dashboard edits take effect on the next call without a redeploy.
+ *
+ * Config here is a *fallback* source: env vars always win (see
+ * resolveEffectiveConfig in ../config). Any load failure is swallowed and logged
+ * WITHOUT secret values so the bot still boots/answers on env vars alone.
  *
  * Uses the shared service-role client, which bypasses RLS.
  */
@@ -13,13 +21,42 @@
 import { supabase } from "./supabase";
 import { logger } from "../logger";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * The `bot_config` row (id=1). Columns mirror the live migrated schema.
+ * The tenant id for this deployment. Required and fail-fast — unlike the lenient
+ * credential fallbacks, a missing/invalid BOT_ID is a fatal misconfiguration
+ * because it determines which tenant's data we read and write.
+ */
+export const BOT_ID: string = (() => {
+  const value = process.env.BOT_ID?.trim();
+  if (!value) {
+    throw new Error("Missing required environment variable: BOT_ID");
+  }
+  if (!UUID_RE.test(value)) {
+    throw new Error("BOT_ID must be a valid uuid");
+  }
+  return value;
+})();
+
+/** The tenant row from `bots` (this IS the tenant table; it has no bot_id). */
+export interface BotRow {
+  id: string;
+  name: string | null;
+  slug: string | null;
+  active: boolean | null;
+  created_at: string | null;
+}
+
+/**
+ * The `bot_config` row for this tenant (bot_config.bot_id = BOT_ID).
  * `compiled_instructions` (when non-empty) overrides the locally-built system
  * prompt; see ../ai/systemPrompt.ts.
  */
 export interface BotConfigRow {
   id: number;
+  bot_id: string;
   telephony_provider: string | null;
   tts_provider: string | null;
   tts_voice: string | null;
@@ -38,26 +75,41 @@ export interface BotConfigRow {
 export type CredentialsMap = Record<string, Record<string, unknown>>;
 
 export interface RemoteConfig {
+  /** This tenant's `bots` row, or null when it does not exist / not yet loaded. */
+  bot: BotRow | null;
   botConfig: BotConfigRow | null;
   credentials: CredentialsMap;
 }
 
 /** Last successfully loaded values. Starts empty so accessors are always safe. */
-let cache: RemoteConfig = { botConfig: null, credentials: {} };
+let cache: RemoteConfig = { bot: null, botConfig: null, credentials: {} };
 
 /**
- * Fetch the bot_config row (id=1) and every api_credentials row from Supabase.
- * On success, updates the in-memory cache and returns the fresh values. On any
- * error, logs a warning (no secrets) and returns the current (possibly empty)
- * cache so callers can proceed on env vars.
+ * Whether we have EVER completed a successful load. Used to distinguish
+ * "Supabase unreachable, can't verify" (fail-open — treat bot as enabled) from
+ * "load succeeded and this tenant has no/inactive bots row" (disable the bot).
+ */
+let hasLoadedSuccessfully = false;
+
+/**
+ * Fetch this tenant's bots row, bot_config row, and api_credentials rows from
+ * Supabase (all scoped by bot_id = BOT_ID). On success, overwrites the in-memory
+ * cache and returns the fresh values. On any error, logs a warning (no secrets)
+ * and returns the current (possibly empty / last-known-good) cache so callers can
+ * proceed on env vars.
  */
 export async function loadRemoteConfig(): Promise<RemoteConfig> {
   try {
-    const [botConfigRes, credentialsRes] = await Promise.all([
-      supabase.from("bot_config").select("*").eq("id", 1).maybeSingle(),
-      supabase.from("api_credentials").select("provider, credentials"),
+    const [botRes, botConfigRes, credentialsRes] = await Promise.all([
+      supabase.from("bots").select("*").eq("id", BOT_ID).maybeSingle(),
+      supabase.from("bot_config").select("*").eq("bot_id", BOT_ID).maybeSingle(),
+      supabase
+        .from("api_credentials")
+        .select("provider, credentials")
+        .eq("bot_id", BOT_ID),
     ]);
 
+    if (botRes.error) throw botRes.error;
     if (botConfigRes.error) throw botConfigRes.error;
     if (credentialsRes.error) throw credentialsRes.error;
 
@@ -71,9 +123,11 @@ export async function loadRemoteConfig(): Promise<RemoteConfig> {
     }
 
     cache = {
+      bot: (botRes.data as BotRow | null) ?? null,
       botConfig: (botConfigRes.data as BotConfigRow | null) ?? null,
       credentials,
     };
+    hasLoadedSuccessfully = true;
     return cache;
   } catch (err) {
     // Never log secret values — only the error message.
@@ -91,17 +145,26 @@ export function getRemoteConfig(): RemoteConfig {
 
 /**
  * Kill switch: whether the bot should answer calls / process messages.
- * Fail-open by design — only `bot_config.bot_enabled === false` disables the bot.
- * A null/undefined value (Supabase unreachable or row missing) is treated as
- * ENABLED so a brief Supabase outage can't brick inbound handling.
+ *
+ * Fail-OPEN when we could never reach Supabase (can't verify → don't brick the
+ * bot). Once we have a confirmed load, the bot is disabled when ANY of:
+ *   (a) this tenant's `bots` row does not exist, or
+ *   (b) that row's `active` is false, or
+ *   (c) `bot_config.bot_enabled` is explicitly false.
+ * Null/undefined `bot_enabled`/`active` are treated as enabled (only an explicit
+ * false disables).
  */
 export function isBotEnabled(): boolean {
+  if (!hasLoadedSuccessfully) return true; // never verified → fail-open
+  if (!cache.bot) return false; // confirmed: no tenant row
+  if (cache.bot.active === false) return false; // tenant deactivated
   return cache.botConfig?.bot_enabled !== false;
 }
 
 /**
- * Read a single credential value from the cached credentials map.
- * Returns undefined when the provider/key is absent or the value is not a string.
+ * Read a single credential value from the cached credentials map (already scoped
+ * to BOT_ID by loadRemoteConfig). Returns undefined when the provider/key is
+ * absent or the value is not a string.
  */
 export function getCredential(provider: string, key: string): string | undefined {
   const value = cache.credentials[provider]?.[key];

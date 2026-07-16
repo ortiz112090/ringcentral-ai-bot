@@ -1,9 +1,9 @@
 import { Router, Request, Response } from "express";
-import { config } from "../config";
+import { config, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
-import { answerCall } from "../ringcentral/telephony";
+import { answerCall, transferToHuman } from "../ringcentral/telephony";
 import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
-import { isBotEnabled } from "../db/remoteConfig";
+import { isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import {
   attachMediaSink,
   endCallBridge,
@@ -86,11 +86,38 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
     if (direction !== "Inbound") continue;
 
     if (status === "Setup" || status === "Proceeding") {
-      // Kill switch: when bot_config.bot_enabled is explicitly false, don't answer —
-      // let the call ring through to RingCentral's default handling. Fail-open if
-      // Supabase config is unavailable (see isBotEnabled).
+      // Refresh this tenant's config fresh per call so dashboard edits (newly
+      // compiled script, bot_enabled/active toggles, updated credentials) take
+      // effect on the very next call without a redeploy. Non-fatal on failure —
+      // loadRemoteConfig keeps the last-known-good cache and isBotEnabled fails open.
+      await loadRemoteConfig();
+
+      // Kill switch: disabled when the tenant's bots row is missing/inactive or
+      // bot_config.bot_enabled is false (see isBotEnabled). When disabled, hand the
+      // call to the escalation queue if one is configured; otherwise ring through.
       if (!isBotEnabled()) {
-        logger.info("Bot disabled; inbound call not answered", { sessionId, callerNumber });
+        const { escalationExtension } = await resolveEffectiveConfig();
+        if (escalationExtension) {
+          logger.info("Bot disabled; escalating inbound call to human queue", {
+            sessionId,
+            callerNumber,
+            extension: escalationExtension,
+          });
+          try {
+            await answerCall(sessionId, partyId);
+            await transferToHuman(sessionId, partyId, escalationExtension);
+          } catch (err) {
+            logger.error("Failed to escalate disabled-bot call; letting it ring through", {
+              sessionId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        } else {
+          logger.info("Bot disabled and no escalation extension; inbound call not answered", {
+            sessionId,
+            callerNumber,
+          });
+        }
         continue;
       }
       // New inbound call — answer it and open the GPT-4o Realtime speech-to-speech
@@ -119,6 +146,8 @@ async function handleSmsEvent(messageBody: any): Promise<void> {
   if (!from || !text) return;
 
   logger.info("Inbound SMS received", { from });
+  // Refresh tenant config so the kill switch reflects the latest dashboard state.
+  await loadRemoteConfig();
   // Kill switch: same gate as inbound calls — skip processing when disabled.
   if (!isBotEnabled()) {
     logger.info("Bot disabled; inbound SMS not processed", { from });

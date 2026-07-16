@@ -53,6 +53,11 @@ services:
         value: https://hiqyfprmtipgrvwadqdb.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # Tenant identity (multi-tenant). REQUIRED — the bot only reads/writes rows
+      # where bot_id = BOT_ID. Per-tenant: get this from the dashboard's Bots page.
+      # Default below is the primary bot ("Insurance Express").
+      - key: BOT_ID
+        value: 00000000-0000-0000-0000-000000000001
       - key: AGENT_NAME
         sync: false
       - key: BROKERAGE_NAME
