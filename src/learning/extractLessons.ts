@@ -1,6 +1,6 @@
 import { config } from "../config";
 import { logger } from "../logger";
-import { openai } from "../ai/openaiClient";
+import { getOpenAI } from "../ai/openaiClient";
 import { createEmbedding } from "../speech/openai";
 import {
   getCallTag,
@@ -69,6 +69,7 @@ Extract the generalized lesson as specified.`;
 
   let lesson: ExtractedLesson;
   try {
+    const openai = await getOpenAI();
     const response = await openai.chat.completions.create({
       model: config.openai.chatModel,
       max_tokens: 500,

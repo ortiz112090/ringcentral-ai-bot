@@ -1,4 +1,4 @@
-import { config } from "../config";
+import { config, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { rcGet, rcPost } from "./client";
 
@@ -42,19 +42,31 @@ export async function answerCall(sessionId: string, partyId: string): Promise<vo
 export async function transferToHuman(
   sessionId: string,
   partyId: string,
-  extension: string = config.ringcentral.escalationExtension
+  extension?: string
 ): Promise<void> {
+  // Resolve the escalation extension per-tenant (env + this bot's Supabase config)
+  // when the caller doesn't supply one, rather than the raw env baseline which is
+  // empty for correctly-configured non-primary tenants.
+  const ext =
+    extension ?? (await resolveEffectiveConfig()).escalationExtension ?? "";
+  if (!ext) {
+    logger.error("Cannot transfer call: no escalation extension configured for this tenant", {
+      sessionId,
+      partyId,
+    });
+    throw new Error("No escalation extension configured for this tenant");
+  }
   try {
     await rcPost(
       `${ACCOUNT}/telephony/sessions/${sessionId}/parties/${partyId}/transfer`,
-      { extensionNumber: extension }
+      { extensionNumber: ext }
     );
-    logger.info("Transferred call to human queue", { sessionId, partyId, extension });
+    logger.info("Transferred call to human queue", { sessionId, partyId, extension: ext });
   } catch (err) {
     logger.error("Failed to transfer call", {
       sessionId,
       partyId,
-      extension,
+      extension: ext,
       error: err instanceof Error ? err.message : String(err),
     });
     throw err;
