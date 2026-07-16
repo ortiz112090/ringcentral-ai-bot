@@ -90,6 +90,16 @@ export function getRemoteConfig(): RemoteConfig {
 }
 
 /**
+ * Kill switch: whether the bot should answer calls / process messages.
+ * Fail-open by design — only `bot_config.bot_enabled === false` disables the bot.
+ * A null/undefined value (Supabase unreachable or row missing) is treated as
+ * ENABLED so a brief Supabase outage can't brick inbound handling.
+ */
+export function isBotEnabled(): boolean {
+  return cache.botConfig?.bot_enabled !== false;
+}
+
+/**
  * Read a single credential value from the cached credentials map.
  * Returns undefined when the provider/key is absent or the value is not a string.
  */

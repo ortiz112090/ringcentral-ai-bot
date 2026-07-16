@@ -3,6 +3,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { answerCall } from "../ringcentral/telephony";
 import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
+import { isBotEnabled } from "../db/remoteConfig";
 import {
   attachMediaSink,
   endCallBridge,
@@ -85,6 +86,13 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
     if (direction !== "Inbound") continue;
 
     if (status === "Setup" || status === "Proceeding") {
+      // Kill switch: when bot_config.bot_enabled is explicitly false, don't answer —
+      // let the call ring through to RingCentral's default handling. Fail-open if
+      // Supabase config is unavailable (see isBotEnabled).
+      if (!isBotEnabled()) {
+        logger.info("Bot disabled; inbound call not answered", { sessionId, callerNumber });
+        continue;
+      }
       // New inbound call — answer it and open the GPT-4o Realtime speech-to-speech
       // bridge. The bridge creates call state + the DB record and streams audio both
       // ways for the life of the call (see src/ringcentral/audioBridge.ts).
@@ -111,6 +119,11 @@ async function handleSmsEvent(messageBody: any): Promise<void> {
   if (!from || !text) return;
 
   logger.info("Inbound SMS received", { from });
+  // Kill switch: same gate as inbound calls — skip processing when disabled.
+  if (!isBotEnabled()) {
+    logger.info("Bot disabled; inbound SMS not processed", { from });
+    return;
+  }
   // Reuse the call pipeline keyed by phone number as a pseudo call id.
   const smsCallId = `sms:${from}`;
   await onCallStarted(smsCallId, from);
