@@ -69,6 +69,10 @@ export interface BotConfigRow {
   compiled_instructions: string | null;
   realtime_voice: string | null;
   personality: string | null;
+  /** This tenant's assigned RingCentral main number (dashboard-assigned). */
+  rc_main_number: string | null;
+  /** This tenant's assigned RingCentral extension (dashboard-assigned). */
+  rc_extension: string | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */
