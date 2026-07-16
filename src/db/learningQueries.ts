@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { logger } from "../logger";
+import { BOT_ID } from "./remoteConfig";
 import {
   CallTag,
   LearnedRule,
@@ -28,6 +29,7 @@ export async function insertTrainingCall(input: {
   const { data, error } = await supabase
     .from("training_calls")
     .insert({
+      bot_id: BOT_ID,
       source: input.source,
       transcript: input.transcript,
       audio_url: input.audioUrl ?? null,
@@ -47,6 +49,7 @@ export async function getTrainingCall(id: number): Promise<TrainingCall | null> 
   const { data, error } = await supabase
     .from("training_calls")
     .select("*")
+    .eq("bot_id", BOT_ID)
     .eq("id", id)
     .maybeSingle();
   if (error) {
@@ -71,6 +74,7 @@ export async function insertCallTag(input: {
   const { data, error } = await supabase
     .from("call_tags")
     .insert({
+      bot_id: BOT_ID,
       training_call_id: input.trainingCallId,
       tag_type: input.tagType,
       category: input.category,
@@ -93,6 +97,7 @@ export async function getCallTag(id: number): Promise<CallTag | null> {
   const { data, error } = await supabase
     .from("call_tags")
     .select("*")
+    .eq("bot_id", BOT_ID)
     .eq("id", id)
     .maybeSingle();
   if (error) {
@@ -113,6 +118,7 @@ export async function insertLearnedRule(input: {
   embedding?: number[] | null;
 }): Promise<number | null> {
   const payload: Record<string, unknown> = {
+    bot_id: BOT_ID,
     source_tag_id: input.sourceTagId ?? null,
     category: input.category,
     situation_summary: input.situationSummary,
@@ -143,6 +149,7 @@ export async function listLearnedRulesByStatus(
   const { data, error } = await supabase
     .from("learned_rules")
     .select("*")
+    .eq("bot_id", BOT_ID)
     .eq("status", status)
     .order("created_at", { ascending: true });
   if (error) {
@@ -164,6 +171,7 @@ export async function setLearnedRuleStatus(
       reviewed_at: new Date().toISOString(),
       reviewed_by: reviewedBy,
     })
+    .eq("bot_id", BOT_ID)
     .eq("id", id);
   if (error) {
     logger.error("Failed to update learned rule status", { id, status, error: error.message });
@@ -182,6 +190,7 @@ export async function getApprovedRulesByCategory(
   let query = supabase
     .from("learned_rules")
     .select("*")
+    .eq("bot_id", BOT_ID)
     .eq("status", "approved")
     .order("created_at", { ascending: false })
     .limit(limit);

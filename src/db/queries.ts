@@ -1,5 +1,6 @@
 import { supabase } from "./supabase";
 import { logger } from "../logger";
+import { BOT_ID } from "./remoteConfig";
 import {
   CallOutcome,
   CallRecord,
@@ -14,6 +15,7 @@ import {
 
 export async function createCallRecord(record: CallRecord): Promise<void> {
   const { error } = await supabase.from("calls").insert({
+    bot_id: BOT_ID,
     call_id: record.call_id,
     caller_number: record.caller_number,
     started_at: record.started_at,
@@ -36,6 +38,7 @@ export async function setRealtimeSessionId(
   const { error } = await supabase
     .from("calls")
     .update({ realtime_session_id: realtimeSessionId })
+    .eq("bot_id", BOT_ID)
     .eq("call_id", callId);
   if (error) {
     logger.error("Failed to set realtime session id", { callId, error: error.message });
@@ -59,6 +62,7 @@ export async function finalizeCallRecord(
       transcript: fields.transcript ?? undefined,
       ended_at: fields.endedAt ?? new Date().toISOString(),
     })
+    .eq("bot_id", BOT_ID)
     .eq("call_id", callId);
   if (error) {
     logger.error("Failed to finalize call record", { callId, error: error.message });
@@ -70,6 +74,7 @@ export async function findLeadByPhone(phone: string): Promise<LeadRecord | null>
   const { data, error } = await supabase
     .from("leads")
     .select("*")
+    .eq("bot_id", BOT_ID)
     .eq("phone_number", phone)
     .maybeSingle();
   if (error) {
@@ -85,6 +90,7 @@ export async function findLeadByPhone(phone: string): Promise<LeadRecord | null>
  */
 export async function upsertLead(lead: LeadRecord): Promise<void> {
   const payload: Record<string, unknown> = {
+    bot_id: BOT_ID,
     phone_number: lead.phone_number,
     last_contacted_at: lead.last_contacted_at ?? new Date().toISOString(),
     updated_at: new Date().toISOString(),

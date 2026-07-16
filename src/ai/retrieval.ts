@@ -1,6 +1,7 @@
 import { config } from "../config";
 import { logger } from "../logger";
 import { createEmbedding } from "../speech/openai";
+import { BOT_ID } from "../db/remoteConfig";
 import {
   getApprovedRulesByCategory,
   matchApprovedRules,
@@ -43,7 +44,11 @@ export async function retrieveRelevantLessons(callerText: string): Promise<Learn
     if (config.learning.usePgvector && callerText.trim()) {
       const embedding = await createEmbedding(callerText);
       if (embedding) {
-        const matches = await matchApprovedRules(embedding, limit, category);
+        // The match_learned_rules RPC is dashboard-owned and may not filter by
+        // tenant, so scope its results to this bot defensively before use.
+        const matches = (await matchApprovedRules(embedding, limit, category)).filter(
+          (r) => r.bot_id === undefined || r.bot_id === BOT_ID
+        );
         if (matches.length > 0) return matches;
         // No vector matches (or RPC missing) — fall through to category lookup.
       }

@@ -94,8 +94,12 @@ export interface CallTag {
 
 export interface LearnedRule {
   id: number;
+  // Tenant owner (multi-tenant). Present on all rows in the live schema.
+  bot_id?: string;
   source_tag_id?: number | null;
   category: string;
+  // Optional link to a script stage (added dashboard-side alongside multi-tenancy).
+  stage_key?: string | null;
   situation_summary: string;
   recommended_response: string;
   avoid_response?: string | null;
