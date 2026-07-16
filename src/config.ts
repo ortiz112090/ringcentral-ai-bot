@@ -12,6 +12,21 @@
 // cycle (config -> remoteConfig -> supabase -> config). The runtime helpers are
 // required lazily inside resolveEffectiveConfig() instead.
 import type { BotConfigRow } from "./db/remoteConfig";
+import { logger } from "./logger";
+
+/**
+ * The original/primary tenant ("Insurance Express"). ONLY this bot is allowed to
+ * fall back to plain environment-variable credentials when a Supabase-sourced
+ * credential is missing. Every other BOT_ID must source credentials from
+ * Supabase exclusively — see resolveCredential() below.
+ */
+export const PRIMARY_BOT_ID = "00000000-0000-0000-0000-000000000001";
+
+/** Current tenant id (unset/blank on the primary's legacy deploy). */
+export const BOT_ID = envValue("BOT_ID");
+
+/** True only for the primary tenant; gates env-var credential fallback. */
+export const IS_PRIMARY_BOT = BOT_ID === PRIMARY_BOT_ID;
 
 function required(name: string): string {
   const value = process.env[name];
@@ -40,6 +55,38 @@ function envFirst(
   const env = envValue(name);
   if (env !== undefined) return env;
   return remoteValue && remoteValue.trim() !== "" ? remoteValue : undefined;
+}
+
+/**
+ * Credential resolver with per-tenant isolation.
+ *
+ * Primary bot (BOT_ID === PRIMARY_BOT_ID): env-first behavior is UNCHANGED — env
+ * wins, otherwise the Supabase value. This preserves the original single-bot
+ * deploy that carries its secrets in env vars.
+ *
+ * Any other (non-primary) bot: env-var fallback is DISABLED. The credential must
+ * come from Supabase (getCredential). If the Supabase value is missing we return
+ * undefined and warn (no secret values) rather than leaking the primary deploy's
+ * shared env-var credentials into a different tenant.
+ *
+ * `label` names the provider/key for the warning only — never a secret value.
+ */
+function resolveCredential(
+  name: string,
+  remoteValue: string | null | undefined,
+  label: string
+): string | undefined {
+  if (IS_PRIMARY_BOT) {
+    return envFirst(name, remoteValue);
+  }
+  const remote = remoteValue && remoteValue.trim() !== "" ? remoteValue : undefined;
+  if (remote === undefined) {
+    logger.warn(
+      "Non-primary bot has no Supabase credential; env-var fallback is disabled for non-primary tenants",
+      { botId: BOT_ID ?? null, credential: label }
+    );
+  }
+  return remote;
 }
 
 export const config = {
@@ -144,26 +191,45 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
 
   return {
     ringcentral: {
-      clientId: envFirst("RINGCENTRAL_CLIENT_ID", getCredential("ringcentral", "client_id")),
-      clientSecret: envFirst(
-        "RINGCENTRAL_CLIENT_SECRET",
-        getCredential("ringcentral", "client_secret")
+      // Secrets: env fallback only for the primary bot (see resolveCredential).
+      clientId: resolveCredential(
+        "RINGCENTRAL_CLIENT_ID",
+        getCredential("ringcentral", "client_id"),
+        "ringcentral.client_id"
       ),
+      clientSecret: resolveCredential(
+        "RINGCENTRAL_CLIENT_SECRET",
+        getCredential("ringcentral", "client_secret"),
+        "ringcentral.client_secret"
+      ),
+      // Non-secret endpoint with a public default: keep env-first for all bots.
       serverUrl:
         envFirst("RINGCENTRAL_SERVER_URL", getCredential("ringcentral", "server_url")) ??
         "https://platform.ringcentral.com",
-      jwt: envFirst("RINGCENTRAL_JWT", getCredential("ringcentral", "jwt")),
+      jwt: resolveCredential(
+        "RINGCENTRAL_JWT",
+        getCredential("ringcentral", "jwt"),
+        "ringcentral.jwt"
+      ),
       escalationExtension: envFirst(
         "ESCALATION_QUEUE_EXTENSION",
         botConfig?.escalation_extension
       ),
     },
     openai: {
-      apiKey: envFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
+      apiKey: resolveCredential(
+        "OPENAI_API_KEY",
+        getCredential("openai-tts", "api_key"),
+        "openai.api_key"
+      ),
     },
     business: {
-      agentName: envFirst("AGENT_NAME", botConfig?.agent_name) ?? "Alex",
-      brokerageName: envFirst("BROKERAGE_NAME", botConfig?.brokerage_name) ?? "our brokerage",
+      // Tenant identity: non-primary bots must not inherit the primary deploy's
+      // env-var name/brokerage — resolve from Supabase only, else safe default.
+      agentName: resolveCredential("AGENT_NAME", botConfig?.agent_name, "business.agent_name") ?? "Alex",
+      brokerageName:
+        resolveCredential("BROKERAGE_NAME", botConfig?.brokerage_name, "business.brokerage_name") ??
+        "our brokerage",
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",

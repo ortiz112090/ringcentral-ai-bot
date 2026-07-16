@@ -3,7 +3,7 @@ import { config } from "../config";
 import { logger } from "../logger";
 import { answerCall } from "../ringcentral/telephony";
 import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
-import { isBotEnabled } from "../db/remoteConfig";
+import { getRemoteConfig, isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import {
   attachMediaSink,
   endCallBridge,
@@ -24,6 +24,17 @@ import {
  * Everything is wrapped so a malformed notification can never crash the server —
  * we log and return 200 so RingCentral does not disable the subscription.
  */
+/**
+ * Normalize a phone number to a bare comparable digit string. Strips all
+ * formatting (spaces, dashes, parens, leading "+") and a leading US country
+ * code ("1") so "+1 (415) 555-0100", "14155550100" and "4155550100" all compare
+ * equal. Shared by the per-tenant inbound routing filter.
+ */
+export function normalizePhoneNumber(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+
 export const webhookRouter = Router();
 
 webhookRouter.post("/webhooks/ringcentral", async (req: Request, res: Response) => {
@@ -76,6 +87,11 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
   const sessionId: string = sessionBody.telephonySessionId ?? sessionBody.sessionId;
   const parties: any[] = sessionBody.parties ?? [];
 
+  // Refresh the Supabase-backed config so per-tenant routing (rc_main_number /
+  // rc_extension) and the bot_enabled kill switch below reflect the latest
+  // dashboard state on every inbound call. Fail-open on error (see loadRemoteConfig).
+  await loadRemoteConfig();
+
   for (const party of parties) {
     const direction = party?.direction;
     const status = party?.status?.code;
@@ -84,6 +100,44 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
 
     // Only the inbound leg into our number interests us.
     if (direction !== "Inbound") continue;
+
+    // Per-tenant routing gate (runs BEFORE the bot_enabled kill switch, using the
+    // freshly-reloaded config above). Two Render services share one RingCentral
+    // account + Supabase DB, so a webhook subscription may deliver sessions that
+    // belong to the *other* tenant. Only proceed for calls whose destination
+    // matches THIS bot's assigned number/extension.
+    //   - Both fields unset  => unassigned: fail open (preserve single-bot setups).
+    //   - At least one set   => require the destination to match number OR extension.
+    const botCfg = getRemoteConfig().botConfig;
+    const assignedNumber = botCfg?.rc_main_number?.trim() || "";
+    const assignedExtension = botCfg?.rc_extension?.trim() || "";
+    if (assignedNumber || assignedExtension) {
+      const destNumber = party?.to?.phoneNumber ?? null;
+      // Best-effort extension match. RingCentral's telephony session party exposes
+      // `to.extensionId` (the account-internal extension id); some account setups
+      // omit a dialed-extension field entirely from the webhook payload. When it's
+      // absent we rely on main-number matching alone (see task limitation note).
+      const destExtension =
+        party?.to?.extensionId != null ? String(party.to.extensionId) : null;
+      const numberMatches =
+        assignedNumber !== "" &&
+        destNumber != null &&
+        normalizePhoneNumber(destNumber) === normalizePhoneNumber(assignedNumber);
+      const extensionMatches =
+        assignedExtension !== "" &&
+        destExtension != null &&
+        destExtension === assignedExtension;
+      if (!numberMatches && !extensionMatches) {
+        // Belongs to a different tenant/service — skip entirely: do not answer,
+        // do not escalate. RingCentral may occasionally deliver out-of-filter events.
+        logger.info("Inbound call not for this tenant's assignment; skipping", {
+          sessionId,
+          destNumber,
+          destExtension,
+        });
+        continue;
+      }
+    }
 
     if (status === "Setup" || status === "Proceeding") {
       // Kill switch: when bot_config.bot_enabled is explicitly false, don't answer —

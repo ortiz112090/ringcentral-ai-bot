@@ -27,6 +27,11 @@ export interface BotConfigRow {
   agent_name: string | null;
   brokerage_name: string | null;
   escalation_extension: string | null;
+  // Per-tenant RingCentral assignment (set from the dashboard). Used to route
+  // only this bot's own inbound calls; see number/extension filter in
+  // ../routes/webhooks.ts. Both null/empty => unassigned (fail open).
+  rc_main_number: string | null;
+  rc_extension: string | null;
   bot_enabled: boolean | null;
   updated_at: string | null;
   compiled_instructions: string | null;
