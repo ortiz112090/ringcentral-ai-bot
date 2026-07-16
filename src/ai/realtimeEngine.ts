@@ -1,5 +1,6 @@
 import WebSocket from "ws";
-import { config } from "../config";
+import { config, resolveEffectiveConfig } from "../config";
+import { BOT_ID } from "../db/remoteConfig";
 import { logger } from "../logger";
 import { buildRealtimeInstructions } from "./systemPrompt";
 import { retrieveRelevantLessons } from "./retrieval";
@@ -111,9 +112,17 @@ export class RealtimeEngine {
     // behavior as the text path). Retrieval never throws — worst case, empty list.
     let lessons = await retrieveRelevantLessons("");
     try {
+      // Resolve the OpenAI key per-tenant (env + this bot's Supabase credentials),
+      // not the raw env baseline which is empty for non-primary tenants.
+      const apiKey = (await resolveEffectiveConfig()).openai.apiKey;
+      if (!apiKey) {
+        throw new Error(
+          `OpenAI API key missing for tenant BOT_ID=${BOT_ID}; cannot open realtime session`
+        );
+      }
       this.ws = new WebSocket(REALTIME_URL, {
         headers: {
-          Authorization: `Bearer ${config.openai.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           "OpenAI-Beta": "realtime=v1",
         },
       });

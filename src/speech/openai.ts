@@ -1,7 +1,7 @@
 import { toFile } from "openai";
 import { config } from "../config";
 import { logger } from "../logger";
-import { openai as client } from "../ai/openaiClient";
+import { getOpenAI } from "../ai/openaiClient";
 
 /**
  * Speech-to-text. Takes raw caller audio bytes (e.g. a wav/mp3 chunk pulled from
@@ -17,6 +17,7 @@ export async function transcribeAudio(
 ): Promise<string> {
   try {
     const file = await toFile(audio, filename);
+    const client = await getOpenAI();
     const result = await client.audio.transcriptions.create({
       file,
       model: config.openai.sttModel,
@@ -35,6 +36,7 @@ export async function transcribeAudio(
  * (MP3 by default) ready to be played back to the caller via RingCentral.
  */
 export async function synthesizeSpeech(text: string): Promise<Buffer> {
+  const client = await getOpenAI();
   const response = await client.audio.speech.create({
     model: config.openai.ttsModel,
     voice: config.openai.ttsVoice,
@@ -53,6 +55,7 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
  */
 export async function createEmbedding(text: string): Promise<number[] | null> {
   try {
+    const client = await getOpenAI();
     const result = await client.embeddings.create({
       model: config.openai.embeddingModel,
       input: text,

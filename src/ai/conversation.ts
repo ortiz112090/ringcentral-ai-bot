@@ -1,7 +1,7 @@
 import { config } from "../config";
 import { logger } from "../logger";
 import { buildSystemPrompt } from "./systemPrompt";
-import { openai } from "./openaiClient";
+import { getOpenAI } from "./openaiClient";
 import { retrieveRelevantLessons } from "./retrieval";
 import { LeadRecord } from "../db/types";
 
@@ -55,6 +55,7 @@ export async function getBotDecision(
     const lastCallerLine = [...history].reverse().find((t) => t.role === "user")?.content ?? "";
     const lessons = await retrieveRelevantLessons(lastCallerLine);
 
+    const openai = await getOpenAI();
     const response = await openai.chat.completions.create({
       model: config.openai.chatModel,
       max_tokens: 500,
