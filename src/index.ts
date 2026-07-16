@@ -5,6 +5,7 @@ import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
 import { ensureLogin } from "./ringcentral/client";
 import { ensureWebhookSubscription } from "./ringcentral/telephony";
+import { loadRemoteConfig } from "./db/remoteConfig";
 
 async function main(): Promise<void> {
   const app = express();
@@ -28,6 +29,24 @@ async function main(): Promise<void> {
   const server = app.listen(config.port, () => {
     logger.info("Server listening", { port: config.port });
   });
+
+  // Warm the Supabase-backed config cache before anything reads it. Non-fatal:
+  // on failure the bot proceeds on env vars alone. Never log secret values.
+  try {
+    const remote = await loadRemoteConfig();
+    logger.info("Remote config loaded", {
+      botConfigFound: remote.botConfig !== null,
+      credentialProviders: Object.keys(remote.credentials),
+      compiledInstructionsPresent: Boolean(
+        remote.botConfig?.compiled_instructions &&
+          remote.botConfig.compiled_instructions.trim() !== ""
+      ),
+    });
+  } catch (err) {
+    logger.error("Remote config load failed (continuing on env vars)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Authenticate to RingCentral and (re)establish the webhook subscription.
   // Failures here are logged but non-fatal — the health check must still pass so

@@ -17,19 +17,19 @@ time: ~45 minutes.
 
 ## 1. Resume the Supabase project & run migrations
 
-The Supabase project (**ref `hawjzggkndvxylzxvwvx`**) is currently **paused**.
+The Supabase project (**ref `hiqyfprmtipgrvwadqdb`**) is currently **paused**.
 
 1. Open the [Supabase dashboard](https://supabase.com/dashboard), select the project,
    and click **Resume / Restore** to unpause it. Wait until it reports healthy.
 2. Get your credentials from **Project Settings → API**:
-   - `SUPABASE_URL` (e.g. `https://hawjzggkndvxylzxvwvx.supabase.co`)
+   - `SUPABASE_URL` (e.g. `https://hiqyfprmtipgrvwadqdb.supabase.co`)
    - `SUPABASE_SERVICE_ROLE_KEY` (the **service_role** secret — server-side only!).
 3. Run the schema. Either:
    - **SQL editor:** open `supabase/migrations/0001_init.sql`, paste it into the
      Supabase SQL editor, and run it, then do the same with
      `supabase/migrations/0002_learning_system.sql` and
      `supabase/migrations/0003_realtime_migration.sql`; **or**
-   - **CLI:** `supabase link --project-ref hawjzggkndvxylzxvwvx && supabase db push`
+   - **CLI:** `supabase link --project-ref hiqyfprmtipgrvwadqdb && supabase db push`
      (applies all migrations in order).
 4. Confirm the tables now exist: `calls`, `leads`, `call_transcripts` (from 0001) and
    `training_calls`, `call_tags`, `learned_rules` (from 0002). Migration 0003 adds the

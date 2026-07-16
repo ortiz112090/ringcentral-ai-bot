@@ -50,7 +50,7 @@ services:
       - key: OPENAI_TTS_VOICE
         value: alloy
       - key: SUPABASE_URL
-        value: https://hawjzggkndvxylzxvwvx.supabase.co
+        value: https://hiqyfprmtipgrvwadqdb.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: AGENT_NAME
