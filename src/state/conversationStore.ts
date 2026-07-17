@@ -1,5 +1,6 @@
 import { ChatTurn } from "../ai/conversation";
 import { LeadRecord, TranscriptTurn } from "../db/types";
+import { insertCallTranscriptTurn } from "../db/queries";
 
 /**
  * In-memory per-call conversation state, keyed by RingCentral telephony session id.
@@ -47,6 +48,7 @@ export function recordCallerTurn(state: CallState, text: string): void {
   const ts = new Date().toISOString();
   state.history.push({ role: "user", content: text });
   state.transcript.push({ role: "caller", text, timestamp: ts });
+  persistTurn(state, "caller", text);
 }
 
 export function recordBotTurn(state: CallState, text: string): void {
@@ -55,6 +57,18 @@ export function recordBotTurn(state: CallState, text: string): void {
   // keeping history clean and token-cheap.
   state.history.push({ role: "assistant", content: text });
   state.transcript.push({ role: "bot", text, timestamp: ts });
+  persistTurn(state, "bot", text);
+}
+
+/**
+ * Fire-and-forget incremental insert of the turn just pushed. turn_index is the
+ * position in state.transcript (0-based), so it's sequential per call across both
+ * the text and realtime paths. Never awaited/thrown — the DB write must not block
+ * or crash the live call; the full transcript is still persisted at call end.
+ */
+function persistTurn(state: CallState, speaker: TranscriptTurn["role"], text: string): void {
+  const turnIndex = state.transcript.length - 1;
+  void insertCallTranscriptTurn({ callId: state.callId, turnIndex, speaker, text });
 }
 
 export function endCallState(callId: string): void {
