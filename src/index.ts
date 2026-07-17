@@ -5,9 +5,8 @@ import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
 import { twilioVoiceRouter } from "./twilio/voiceWebhook";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
-import { ensureLogin } from "./ringcentral/client";
-import { ensureWebhookSubscription } from "./ringcentral/telephony";
-import { loadRemoteConfig } from "./db/remoteConfig";
+import { provisionTwilioNumber } from "./twilio/provisioning";
+import { BOT_ID, getRemoteConfig, loadRemoteConfig } from "./db/remoteConfig";
 import { closeStaleLiveCalls } from "./db/queries";
 
 async function main(): Promise<void> {
@@ -62,22 +61,27 @@ async function main(): Promise<void> {
   // restart, so the dashboard's LIVE view isn't stuck. Non-fatal.
   await closeStaleLiveCalls();
 
-  // Authenticate to RingCentral and (re)establish the webhook subscription.
-  // Failures here are logged but non-fatal — the health check must still pass so
-  // Render considers the service up, and the operator can fix creds and redeploy.
-  try {
-    await ensureLogin();
-    if (config.publicBaseUrl) {
-      await ensureWebhookSubscription(
-        `${config.publicBaseUrl.replace(/\/$/, "")}/webhooks/ringcentral`
-      );
-    } else {
-      logger.warn("PUBLIC_BASE_URL not set; skipping webhook subscription setup");
-    }
-  } catch (err) {
-    logger.error("RingCentral startup init failed (service still running)", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  // Twilio-native startup. RingCentral is retired from the hot path entirely — no
+  // RC login, no RC webhook subscription (the /webhooks/ringcentral route stays
+  // mounted but never answers/bridges). Instead, assert this tenant is on Twilio
+  // and idempotently point its number at our webhooks.
+  //
+  // telephony_provider defaults to 'twilio' for new bots; a null/blank value is
+  // treated as 'twilio'. If it's set to anything else, this tenant isn't Twilio-
+  // native: log a clear warning and skip Twilio provisioning (don't crash — the
+  // service still starts and stays healthy).
+  const telephonyProvider = (getRemoteConfig().botConfig?.telephony_provider ?? "twilio")
+    .trim()
+    .toLowerCase();
+  if (telephonyProvider !== "twilio") {
+    logger.warn(
+      "telephony_provider is not 'twilio' for this tenant; skipping Twilio number " +
+        "provisioning (bot is Twilio-native and won't apply to this tenant)",
+      { botId: BOT_ID, telephonyProvider }
+    );
+  } else {
+    // Non-fatal by contract (provisionTwilioNumber wraps its own try/catch).
+    await provisionTwilioNumber();
   }
 
   const shutdown = (signal: string) => {

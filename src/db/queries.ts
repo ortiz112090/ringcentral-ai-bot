@@ -95,6 +95,33 @@ export async function closeStaleLiveCalls(
 }
 
 /**
+ * Close a call row IF it is still live (ended_at NULL). Backstop for the Twilio
+ * status callback: if the media WebSocket dies without a clean "stop", the row
+ * would stay open forever. The `.is("ended_at", null)` guard means a clean
+ * teardown that already finalized the outcome/ended_at is never overwritten by a
+ * later status callback. Failure-tolerant: logs and continues.
+ */
+export async function closeCallIfLive(
+  callId: string,
+  outcome: CallOutcome
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("calls")
+    .update({ outcome, ended_at: new Date().toISOString() })
+    .eq("bot_id", BOT_ID)
+    .eq("call_id", callId)
+    .is("ended_at", null)
+    .select("call_id");
+  if (error) {
+    logger.error("Failed to close live call from status callback", { callId, error: error.message });
+    return;
+  }
+  if (data && data.length > 0) {
+    logger.info("Closed live call from Twilio status callback", { callId, outcome });
+  }
+}
+
+/**
  * Record the OpenAI Realtime session id on an existing call row (set once the realtime
  * WebSocket session is established). Failure-tolerant: logs and continues.
  */

@@ -1,28 +1,27 @@
 import { Router, Request, Response } from "express";
-import { config, resolveEffectiveConfig } from "../config";
+import { config } from "../config";
 import { logger } from "../logger";
-import { answerCall, transferToHuman } from "../ringcentral/telephony";
-import { handleCallerUtterance, onCallEnded, onCallStarted } from "../callHandler";
+import { handleCallerUtterance, onCallStarted } from "../callHandler";
 import { getRemoteConfig, isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
-import {
-  attachMediaSink,
-  endCallBridge,
-  MediaSink,
-  pushCallerAudio,
-  startCallBridge,
-} from "../ringcentral/audioBridge";
+import { attachMediaSink, MediaSink, pushCallerAudio } from "../ringcentral/audioBridge";
 
 /**
- * RingCentral webhook receiver.
+ * RingCentral webhook receiver — DORMANT for voice under the Twilio-native rebuild.
  *
- * Two responsibilities:
- * 1. Handle the initial subscription "Validation-Token" handshake (RingCentral
- *    sends a header we must echo back to confirm the endpoint).
- * 2. Process telephony session + SMS notifications: answer new inbound calls,
- *    drive the conversation, and escalate/finalize.
+ * RingCentral is retired from the voice hot path: the bot no longer creates an RC
+ * webhook subscription, so RC never POSTs here in normal operation. This route
+ * stays mounted (harmless if RC never calls it) but MUST NOT answer or bridge any
+ * call — Twilio Media Streams drives all voice now (see src/twilio/*). The RC
+ * modules are kept dormant (not deleted) for a possible future RC-native mode.
  *
- * Everything is wrapped so a malformed notification can never crash the server —
- * we log and return 200 so RingCentral does not disable the subscription.
+ * Responsibilities that remain:
+ * 1. The subscription "Validation-Token" handshake (echo the header back), so any
+ *    stale/manual RC subscription can still be validated without error.
+ * 2. Telephony notifications are logged and ignored (no answer/bridge).
+ * 3. The optional text-only SMS script path is left intact but dormant (RC never
+ *    delivers here without a subscription).
+ *
+ * Everything is wrapped so a malformed notification can never crash the server.
  */
 export const webhookRouter = Router();
 
@@ -82,55 +81,7 @@ function normalizePhoneNumber(value: string | null | undefined): string {
 }
 
 /**
- * Decide whether an inbound call's destination belongs to THIS tenant, based on
- * the dashboard-assigned `bot_config.rc_main_number` / `rc_extension`.
- *
- * Fail-CLOSED: if this tenant has neither a main number nor an extension
- * configured, we can't prove the call is for us, so we REFUSE it. This prevents
- * an unassigned bot (e.g. a dashboard bug that wiped rc_main_number/rc_extension
- * to NULL) from answering calls destined for other numbers on a shared
- * account-wide subscription. A bot with no assignment must never answer a call.
- * If at least one field IS set, the call must match it.
- *
- * Extension matching is best-effort: RingCentral telephony party payloads do not
- * reliably expose the dialed extension on the `to` party, so when no extension
- * field is present on the destination we fall back to main-number matching only.
- */
-function callDestinationMatchesTenant(party: any, sessionId: string): boolean {
-  const botConfig = getRemoteConfig().botConfig;
-  const configuredNumber = normalizePhoneNumber(botConfig?.rc_main_number);
-  const configuredExtension = (botConfig?.rc_extension ?? "").trim();
-
-  // Fail-CLOSED: nothing configured to route on — refuse rather than answer
-  // calls that may belong to other numbers on this account.
-  if (!configuredNumber && !configuredExtension) {
-    logger.warn(
-      "Tenant has no rc_main_number/rc_extension assigned; refusing to process call to avoid answering calls for other numbers",
-      {
-        sessionId,
-        toNumber: party?.to?.phoneNumber ?? null,
-        toExtension: party?.to?.extensionNumber ?? null,
-      }
-    );
-    return false;
-  }
-
-  const destNumber = normalizePhoneNumber(party?.to?.phoneNumber);
-  // Best-effort: `extensionNumber` may be absent on the `to` party; when it is,
-  // destExtension is "" and extension matching is skipped in favor of the number.
-  const destExtension = (party?.to?.extensionNumber ?? "").toString().trim();
-
-  if (configuredNumber && destNumber && destNumber === configuredNumber) {
-    return true;
-  }
-  if (configuredExtension && destExtension && destExtension === configuredExtension) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * SMS counterpart to callDestinationMatchesTenant. The SMS event filter may still
+ * SMS destination gate (fail closed). The SMS event filter may still
  * be account-wide (no reliably-scoped SMS filter), so we apply the same
  * fail-CLOSED destination gate scoped to `rc_main_number`.
  *
@@ -164,97 +115,17 @@ function smsDestinationMatchesTenant(messageBody: any): boolean {
 }
 
 /**
- * Handle a telephony session notification. RingCentral sends the full session
- * with a `parties` array; we act on the inbound caller party's status.
+ * DORMANT: RingCentral telephony notifications are ignored under the Twilio-native
+ * rebuild. RC no longer answers or bridges calls — Twilio Media Streams drives all
+ * voice (see src/twilio/*). We only log receipt so an unexpected RC delivery (e.g.
+ * a stale/manual subscription) is visible without any answer/bridge side effects.
  */
 async function handleTelephonyEvent(sessionBody: any): Promise<void> {
   if (!sessionBody) return;
   const sessionId: string = sessionBody.telephonySessionId ?? sessionBody.sessionId;
-  const parties: any[] = sessionBody.parties ?? [];
-
-  for (const party of parties) {
-    const direction = party?.direction;
-    const status = party?.status?.code;
-    const partyId = party?.id;
-    const callerNumber = party?.from?.phoneNumber ?? null;
-
-    // Only the inbound leg into our number interests us.
-    if (direction !== "Inbound") continue;
-
-    if (status === "Setup" || status === "Proceeding") {
-      // Refresh this tenant's config fresh per call so dashboard edits (newly
-      // compiled script, bot_enabled/active toggles, updated credentials) take
-      // effect on the very next call without a redeploy. Non-fatal on failure —
-      // loadRemoteConfig keeps the last-known-good cache and isBotEnabled fails open.
-      await loadRemoteConfig();
-
-      // Tenant number/extension routing: this bot subscription may receive calls
-      // for numbers that belong to a different tenant. Using the just-reloaded
-      // config, only proceed when the call's destination matches this tenant's
-      // assigned rc_main_number/rc_extension. Fail-CLOSED when neither is set.
-      if (!callDestinationMatchesTenant(party, sessionId)) {
-        logger.info("Inbound call destination not assigned to this tenant; skipping", {
-          sessionId,
-          callerNumber,
-          toNumber: party?.to?.phoneNumber ?? null,
-          toExtension: party?.to?.extensionNumber ?? null,
-        });
-        continue;
-      }
-
-      // Voice provider gate: when this tenant answers voice via Twilio, RingCentral
-      // must NOT answer calls — Twilio Media Streams drives the audio bridge instead
-      // (RC forwards its number to the Twilio number). The RC subscription stays
-      // active for SMS. Default 'ringcentral' keeps the original answer behavior.
-      const { twilio: twilioCfg } = await resolveEffectiveConfig();
-      if (twilioCfg.voiceProvider === "twilio") {
-        logger.info("voice_provider=twilio; skipping RingCentral answer (Twilio handles voice)", {
-          sessionId,
-          callerNumber,
-        });
-        continue;
-      }
-
-      // Kill switch: disabled when the tenant's bots row is missing/inactive or
-      // bot_config.bot_enabled is false (see isBotEnabled). When disabled, hand the
-      // call to the escalation queue if one is configured; otherwise ring through.
-      if (!isBotEnabled()) {
-        const { escalationExtension } = await resolveEffectiveConfig();
-        if (escalationExtension) {
-          logger.info("Bot disabled; escalating inbound call to human queue", {
-            sessionId,
-            callerNumber,
-            extension: escalationExtension,
-          });
-          try {
-            await answerCall(sessionId, partyId);
-            await transferToHuman(sessionId, partyId, escalationExtension);
-          } catch (err) {
-            logger.error("Failed to escalate disabled-bot call; letting it ring through", {
-              sessionId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        } else {
-          logger.info("Bot disabled and no escalation extension; inbound call not answered", {
-            sessionId,
-            callerNumber,
-          });
-        }
-        continue;
-      }
-      // New inbound call — answer it and open the GPT-4o Realtime speech-to-speech
-      // bridge. The bridge creates call state + the DB record and streams audio both
-      // ways for the life of the call (see src/ringcentral/audioBridge.ts).
-      await answerCall(sessionId, partyId);
-      await startCallBridge(sessionId, partyId, callerNumber);
-      logger.info("Inbound call answered (realtime bridge)", { sessionId, callerNumber });
-    } else if (status === "Disconnected") {
-      endCallBridge(sessionId);
-      await onCallEnded(sessionId);
-      logger.info("Call disconnected", { sessionId });
-    }
-  }
+  logger.info("RingCentral telephony event ignored (retired from hot path; Twilio drives voice)", {
+    sessionId,
+  });
 }
 
 /**
