@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { buildVoiceTwiml, type VoiceDecisionInput } from "./voiceWebhook";
 
 const base: VoiceDecisionInput = {
+  callSid: "CA456",
   to: "+15550000001",
   from: "+15557654321",
   twilioNumber: "+15550000001",
@@ -9,6 +10,7 @@ const base: VoiceDecisionInput = {
   botEnabled: true,
   escalationNumber: "+15559999999",
   wssUrl: "wss://bot.example.com/twilio/media",
+  authToken: "test-auth-token",
 };
 
 describe("buildVoiceTwiml fail-closed decisions", () => {
@@ -62,5 +64,25 @@ describe("buildVoiceTwiml fail-closed decisions", () => {
     expect(xml).toContain('<Stream url="wss://bot.example.com/twilio/media">');
     expect(xml).toContain('name="from"');
     expect(xml).toContain('value="+15557654321"');
+  });
+
+  it("answers: includes a call-bound media-stream token parameter", () => {
+    const xml = buildVoiceTwiml(base);
+    expect(xml).toContain('name="token"');
+    // Token is `${exp}.${hexdigest}` — assert the shape is present in the value.
+    const match = xml.match(/name="token" value="(\d+\.[0-9a-f]+)"/);
+    expect(match).not.toBeNull();
+  });
+
+  it("rejects when no auth token is available to sign the media-stream token", () => {
+    const xml = buildVoiceTwiml({ ...base, authToken: undefined });
+    expect(xml).toContain("<Reject");
+    expect(xml).not.toContain("<Connect>");
+  });
+
+  it("rejects when the CallSid is missing (cannot bind the token to a call)", () => {
+    const xml = buildVoiceTwiml({ ...base, callSid: null });
+    expect(xml).toContain("<Reject");
+    expect(xml).not.toContain("<Connect>");
   });
 });

@@ -4,6 +4,7 @@ import { config, mediaStreamWssUrl, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "./client";
+import { createStreamToken } from "./streamToken";
 
 /**
  * Twilio inbound-call webhook (POST /webhooks/twilio/voice).
@@ -28,6 +29,8 @@ function normalizePhoneNumber(value: string | null | undefined): string {
 }
 
 export interface VoiceDecisionInput {
+  /** Twilio CallSid — bound into the media-stream token so it's call-specific. */
+  callSid: string | null;
   /** Called (destination) number from Twilio's `To` param. */
   to: string | null;
   /** Caller number from Twilio's `From` param. */
@@ -42,6 +45,8 @@ export interface VoiceDecisionInput {
   escalationNumber: string | undefined;
   /** wss URL Twilio should stream to; "" when PUBLIC_BASE_URL is unset. */
   wssUrl: string;
+  /** Tenant Twilio auth token — HMAC key for the media-stream token. */
+  authToken: string | undefined;
 }
 
 /**
@@ -99,11 +104,26 @@ export function buildVoiceTwiml(input: VoiceDecisionInput): string {
     return response.toString();
   }
 
+  // Security: the media WebSocket is unauthenticated (Twilio doesn't sign it), so
+  // mint a short-lived, call-bound token the socket verifies on "start". Without a
+  // CallSid or auth token we cannot bind/sign it — reject rather than open an
+  // unprotected stream.
+  if (!input.callSid || !input.authToken) {
+    logger.error("Cannot mint media-stream token (missing CallSid or auth token); rejecting call", {
+      hasCallSid: Boolean(input.callSid),
+      hasAuthToken: Boolean(input.authToken),
+    });
+    response.reject();
+    return response.toString();
+  }
+  const token = createStreamToken(input.callSid, input.authToken);
+
   // Answer: open a bidirectional media stream to the bridge.
   const connect = response.connect();
   const stream = connect.stream({ url: input.wssUrl });
   stream.parameter({ name: "from", value: input.from ?? "" });
   stream.parameter({ name: "to", value: input.to ?? "" });
+  stream.parameter({ name: "token", value: token });
   return response.toString();
 }
 
@@ -133,6 +153,7 @@ export async function handleVoiceWebhook(req: Request, res: Response): Promise<R
   // 3. Fail-closed TwiML decision from effective config + kill switch.
   const { twilio: tw } = await resolveEffectiveConfig();
   const xml = buildVoiceTwiml({
+    callSid: params.CallSid ?? null,
     to: params.To ?? null,
     from: params.From ?? null,
     twilioNumber: tw.number,
@@ -140,6 +161,7 @@ export async function handleVoiceWebhook(req: Request, res: Response): Promise<R
     botEnabled: isBotEnabled(),
     escalationNumber: tw.escalationNumber,
     wssUrl: mediaStreamWssUrl(),
+    authToken: authToken,
   });
 
   res.set("Content-Type", "text/xml");

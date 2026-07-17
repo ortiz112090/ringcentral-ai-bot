@@ -55,7 +55,7 @@ function fakeRes() {
   return res;
 }
 
-const validParams = { To: "+15550000001", From: "+15557654321" };
+const validParams = { CallSid: "CA456", To: "+15550000001", From: "+15557654321" };
 
 beforeEach(() => {
   vi.restoreAllMocks();

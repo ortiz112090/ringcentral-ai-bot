@@ -24,22 +24,38 @@ vi.mock("./escalation", () => ({
   escalateTwilioCall: (...a: any[]) => escalateTwilioCall(...a),
 }));
 
-import { createMediaSession, type TwilioSocket } from "./mediaStream";
+const AUTH_TOKEN = "test-auth-token";
+vi.mock("./client", () => ({
+  getTwilioAuthToken: vi.fn(async () => AUTH_TOKEN),
+}));
 
-function fakeSocket(): TwilioSocket & { sent: string[] } {
-  const sent: string[] = [];
-  return { sent, send: (d: string) => sent.push(d), close: () => {} };
+import { createMediaSession, type TwilioSocket } from "./mediaStream";
+import { createStreamToken } from "./streamToken";
+
+function fakeSocket(): TwilioSocket & { sent: string[]; closed: number } {
+  const s: any = { sent: [] as string[], closed: 0 };
+  s.send = (d: string) => s.sent.push(d);
+  s.close = () => {
+    s.closed += 1;
+  };
+  return s;
 }
 
-const startMsg = JSON.stringify({
-  event: "start",
-  streamSid: "MZ123",
-  start: {
+function startFrame(opts: { callSid?: string; token?: string } = {}): string {
+  const callSid = opts.callSid ?? "CA456";
+  const token = opts.token ?? createStreamToken(callSid, AUTH_TOKEN);
+  return JSON.stringify({
+    event: "start",
     streamSid: "MZ123",
-    callSid: "CA456",
-    customParameters: { from: "+15557654321", to: "+15550000001" },
-  },
-});
+    start: {
+      streamSid: "MZ123",
+      callSid,
+      customParameters: { from: "+15557654321", to: "+15550000001", token },
+    },
+  });
+}
+
+const startMsg = startFrame();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -117,5 +133,66 @@ describe("Twilio media stream lifecycle", () => {
     const options = startCallBridge.mock.calls[0][3];
     await options.onEscalate("CA456");
     expect(escalateTwilioCall).toHaveBeenCalledWith("CA456");
+  });
+});
+
+describe("Twilio media stream token authentication", () => {
+  it("valid token → starts the bridge", async () => {
+    const session = createMediaSession(fakeSocket());
+    await session.onMessage(startFrame());
+    expect(startCallBridge).toHaveBeenCalledTimes(1);
+  });
+
+  it("missing token → closes the socket without starting a bridge", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket);
+    const frame = JSON.stringify({
+      event: "start",
+      streamSid: "MZ123",
+      start: { streamSid: "MZ123", callSid: "CA456", customParameters: { from: "+1" } },
+    });
+    await session.onMessage(frame);
+    expect(startCallBridge).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(1);
+  });
+
+  it("expired token → closes without starting", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket);
+    // Minted 10 minutes ago with a 5-minute TTL → already expired.
+    const past = Math.floor(Date.now() / 1000) - 600;
+    const expired = createStreamToken("CA456", AUTH_TOKEN, 300, past);
+    await session.onMessage(startFrame({ token: expired }));
+    expect(startCallBridge).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(1);
+  });
+
+  it("tampered token → closes without starting", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket);
+    const good = createStreamToken("CA456", AUTH_TOKEN);
+    const tampered = good.slice(0, -1) + (good.endsWith("a") ? "b" : "a");
+    await session.onMessage(startFrame({ token: tampered }));
+    expect(startCallBridge).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(1);
+  });
+
+  it("token bound to a different callSid → closes without starting", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket);
+    // Valid token for CA999, but the start frame claims CA456.
+    const otherToken = createStreamToken("CA999", AUTH_TOKEN);
+    await session.onMessage(startFrame({ callSid: "CA456", token: otherToken }));
+    expect(startCallBridge).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(1);
+  });
+
+  it("after a rejected start, a stray stop does not finalize a call", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket);
+    await session.onMessage(startFrame({ token: "garbage" }));
+    await session.onMessage(JSON.stringify({ event: "stop" }));
+    expect(endCallBridge).not.toHaveBeenCalled();
+    expect(onCallEnded).not.toHaveBeenCalled();
   });
 });

@@ -10,6 +10,8 @@ import {
 } from "../ringcentral/audioBridge";
 import { onCallEnded } from "../callHandler";
 import { escalateTwilioCall } from "./escalation";
+import { getTwilioAuthToken } from "./client";
+import { verifyStreamToken } from "./streamToken";
 
 /**
  * Twilio Media Streams ↔ OpenAI Realtime bridge (WebSocket endpoint /twilio/media).
@@ -74,6 +76,26 @@ export function createMediaSession(socket: TwilioSocket) {
         }
         const sid = streamSid;
         const cid = callSid;
+
+        // Security: the media socket is unauthenticated, so require the call-bound
+        // token minted by the voice webhook. Reject (close, no bridge) when it is
+        // missing, expired, or not a valid HMAC for THIS callSid — otherwise anyone
+        // who finds the wss URL could open a paid Realtime session with a fake call.
+        const authToken = await getTwilioAuthToken();
+        if (!authToken || !verifyStreamToken(cid, params.token, authToken)) {
+          logger.warn("Rejecting Twilio media stream: missing/invalid/expired token", {
+            callSid: cid,
+            streamSid: sid,
+            hasToken: Boolean(params.token),
+            hasAuthToken: Boolean(authToken),
+          });
+          // Reset so a subsequent stop/close doesn't try to tear down a bridge we
+          // never started.
+          callSid = null;
+          streamSid = null;
+          socket.close();
+          break;
+        }
         logger.info("Twilio media stream started", { callSid: cid, streamSid: sid, callerNumber });
         // Bridge escalation goes through the Twilio REST redirect, not RC transfer.
         await startCallBridge(cid, sid, callerNumber, {
