@@ -32,12 +32,29 @@ import { getCallState } from "../state/conversationStore";
 /** Outbound audio sink: the RC media layer implements this to play bot audio to the caller. */
 export type MediaSink = (base64Audio: string) => void;
 
+/**
+ * Transport-specific escalation. When set, escalation redirects the live call via
+ * this handler instead of the default RingCentral extension transfer — used by the
+ * Twilio path, which redirects the call over the Twilio REST API. Receives the
+ * bridge's callId; must not throw (errors are logged by the bridge).
+ */
+export type EscalateHandler = (callId: string) => Promise<void>;
+
+export interface StartBridgeOptions {
+  /** Transport-specific escalation (Twilio). Omit to use RC extension transfer. */
+  onEscalate?: EscalateHandler;
+}
+
 interface CallBridge {
   callId: string;
   partyId: string;
   engine: RealtimeEngine;
   sink: MediaSink | null;
   warnedNoSink: boolean;
+  /** Transport-specific escalation override (Twilio); null → RC transfer. */
+  escalateOverride: EscalateHandler | null;
+  /** Barge-in handler: flush the transport's outbound buffer (Twilio "clear"). */
+  onClear: (() => void) | null;
 }
 
 const bridges = new Map<string, CallBridge>();
@@ -52,7 +69,8 @@ const bridges = new Map<string, CallBridge>();
 export async function startCallBridge(
   callId: string,
   partyId: string,
-  callerNumber: string | null
+  callerNumber: string | null,
+  options?: StartBridgeOptions
 ): Promise<void> {
   try {
     const state = await onCallStarted(callId, callerNumber);
@@ -66,11 +84,14 @@ export async function startCallBridge(
         } else if (!bridge.warnedNoSink) {
           bridge.warnedNoSink = true;
           logger.warn(
-            "Realtime bot audio produced but no RingCentral media sink attached — " +
+            "Realtime bot audio produced but no media sink attached — " +
               "wire attachMediaSink() to your account's media stream (see audioBridge.ts).",
             { callId }
           );
         }
+      },
+      onBargeIn: () => {
+        bridges.get(callId)?.onClear?.();
       },
       onEscalate: async (reason) => {
         logger.info("Realtime escalation", { callId, reason });
@@ -84,7 +105,15 @@ export async function startCallBridge(
       },
     });
 
-    bridges.set(callId, { callId, partyId, engine, sink: null, warnedNoSink: false });
+    bridges.set(callId, {
+      callId,
+      partyId,
+      engine,
+      sink: null,
+      warnedNoSink: false,
+      escalateOverride: options?.onEscalate ?? null,
+      onClear: null,
+    });
     await engine.start();
     logger.info("Realtime bridge started", {
       callId,
@@ -95,7 +124,7 @@ export async function startCallBridge(
       callId,
       error: err instanceof Error ? err.message : String(err),
     });
-    await escalateAndEnd(callId, partyId);
+    await escalateAndEnd(callId, partyId, options?.onEscalate);
   }
 }
 
@@ -110,6 +139,16 @@ export function attachMediaSink(callId: string, sink: MediaSink): void {
   if (bridge) bridge.sink = sink;
 }
 
+/**
+ * Register a barge-in handler invoked when the caller starts speaking over the
+ * bot. The Twilio transport uses this to send a {event:"clear"} frame so Twilio
+ * drops any already-buffered bot audio. No-op for transports that don't buffer.
+ */
+export function attachBargeInHandler(callId: string, onClear: () => void): void {
+  const bridge = bridges.get(callId);
+  if (bridge) bridge.onClear = onClear;
+}
+
 /** Tear down the bridge (call ended / transferred). Idempotent. */
 export function endCallBridge(callId: string): void {
   const bridge = bridges.get(callId);
@@ -122,11 +161,22 @@ export function endCallBridge(callId: string): void {
  * Transfer the call to a human, finalize the record as escalated, and tear down.
  * Used both on explicit escalation and as the safety fallback on any bridge error.
  */
-async function escalateAndEnd(callId: string, partyIdOverride?: string): Promise<void> {
+async function escalateAndEnd(
+  callId: string,
+  partyIdOverride?: string,
+  escalateOverride?: EscalateHandler
+): Promise<void> {
   const bridge = bridges.get(callId);
-  const partyId = bridge?.partyId ?? partyIdOverride;
+  const override = bridge?.escalateOverride ?? escalateOverride ?? null;
   try {
-    if (partyId) await transferToHuman(callId, partyId);
+    if (override) {
+      // Transport-specific escalation (Twilio REST redirect).
+      await override(callId);
+    } else {
+      // Default RingCentral extension transfer.
+      const partyId = bridge?.partyId ?? partyIdOverride;
+      if (partyId) await transferToHuman(callId, partyId);
+    }
   } catch (err) {
     logger.error("Escalation transfer failed", {
       callId,

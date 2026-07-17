@@ -99,6 +99,11 @@ ringcentral-ai-bot/
     │   ├── extractLessons.ts   # OpenAI chat distills a tag into a pending learned_rule
     │   ├── review.ts           # Approve/reject queue (reusable, dashboard-ready)
     │   └── cli.ts              # ingest / tag / review CLI (npm run learn:*)
+    ├── twilio/
+    │   ├── voiceWebhook.ts     # POST /webhooks/twilio/voice (signature + fail-closed TwiML)
+    │   ├── mediaStream.ts      # /twilio/media WebSocket ↔ audioBridge (start/media/stop)
+    │   ├── escalation.ts       # REST redirect of a live Twilio call to a human
+    │   └── client.ts           # Per-tenant Twilio REST client + auth-token resolver
     ├── routes/
     │   ├── health.ts           # GET /health
     │   └── webhooks.ts         # POST /webhooks/ringcentral (calls + SMS)
@@ -205,6 +210,58 @@ outbound sink via `registerBotAudioSink(sessionId, sink)` (both re-exported from
 `src/routes/webhooks.ts`). Audio uses `OPENAI_REALTIME_AUDIO_FORMAT` (default
 `g711_ulaw`, telephony-native) to avoid resampling; transcode at that boundary if your
 media feed differs. See the extended caveat comment at the top of `audioBridge.ts`.
+
+## Twilio voice path (Media Streams ↔ OpenAI Realtime)
+
+Because a raw bidirectional media stream isn't guaranteed on every RingCentral account,
+voice can instead run over **Twilio Media Streams**, which _is_ a simple public
+websocket. RingCentral keeps the phone numbers and SMS; the RC number is **forwarded**
+(configured in RC admin, not in code) to a Twilio number that answers and streams audio
+to this service. Twilio media payloads are base64 `mulaw/8000` — identical to the
+Realtime engine's default `g711_ulaw`, so **no transcoding** happens; the existing
+`audioBridge.ts` is reused unchanged for state, DB records, and escalation.
+
+### How it works
+
+1. **Inbound webhook** — `POST /webhooks/twilio/voice` (`src/twilio/voiceWebhook.ts`).
+   The `X-Twilio-Signature` is validated against the tenant's auth token; an invalid or
+   unverifiable request gets `403`. Then a **fail-closed** decision (in order):
+   - `voice_provider` must be `twilio` **and** `twilio_number` set, else TwiML `<Reject>`.
+   - the called number (`To`) must equal `twilio_number`, else `<Reject>` — the bot never
+     answers other numbers.
+   - kill switch (`bot_enabled=false` / tenant inactive) → `<Dial>escalation_number</Dial>`
+     if set, else `<Hangup>`. No AI runs.
+   - otherwise `<Connect><Stream url="wss://<host>/twilio/media">` with the caller number
+     passed as a custom `<Parameter>`.
+2. **Media WebSocket** — `/twilio/media` (`src/twilio/mediaStream.ts`) runs on the **same
+   HTTP server** (no extra port). On `start` it opens the realtime bridge and wires bot
+   audio back as `media` frames; caller `media` frames are pushed into the model; barge-in
+   (caller speaks over the bot) sends a `clear` frame to flush Twilio's buffer; `stop`,
+   socket close, and socket error all tear the bridge down idempotently.
+3. **Escalation** — Twilio can't blind-transfer to an RC extension, so escalation uses the
+   Twilio REST API to redirect the live call to `<Dial>escalation_number</Dial>` (or a
+   polite `<Say>`+`<Hangup>` if none is set). Wired via the bridge's `onEscalate` hook.
+4. **RC gating** — when `voice_provider === 'twilio'`, the RingCentral telephony handler
+   logs and skips answering entirely; the RC subscription stays active for SMS. Default
+   `ringcentral` preserves the original behavior.
+
+### Required RingCentral forwarding setup
+
+In RingCentral admin, forward the bot's RC number/extension to the tenant's
+`TWILIO_NUMBER`. No code change is needed for forwarding — RC dials Twilio, Twilio answers
+and hits this service.
+
+### Config reference
+
+Per-tenant, dashboard-owned columns on `bot_config` (migration applied externally — the
+bot never migrates): `twilio_number`, `voice_provider` (default `ringcentral`),
+`escalation_number`. Credentials live in `api_credentials` (provider `twilio`:
+`account_sid`, `auth_token`), **DB-first**; the `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`
+env vars are a fallback **only** for the primary bot. `PUBLIC_BASE_URL` derives the
+`wss://<host>/twilio/media` stream URL. See `.env.example` for all keys.
+
+Tests: `npm test` (vitest) covers the webhook signature + fail-closed cases and the media
+stream start/media/stop lifecycle.
 
 ## Future work (out of scope for v1)
 

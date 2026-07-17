@@ -30,6 +30,12 @@ export interface RealtimeCallbacks {
   onBotAudio: (base64Audio: string) => void;
   /** The model decided to escalate — hand the call to a human. Called at most once. */
   onEscalate: (reason: string) => void | Promise<void>;
+  /**
+   * Server VAD detected the caller started speaking over the bot (barge-in).
+   * Transports that buffer outbound audio (e.g. Twilio Media Streams) use this to
+   * flush their play buffer so the bot stops talking immediately. Optional.
+   */
+  onBargeIn?: () => void;
   /** The call reached a terminal outcome (non-escalation). Called at most once. */
   onOutcome: (outcome: CallOutcome) => void | Promise<void>;
 }
@@ -230,6 +236,12 @@ export class RealtimeEngine {
       // Streamed output audio — forward immediately, do NOT buffer.
       case "response.audio.delta":
         if (typeof event.delta === "string") this.callbacks.onBotAudio(event.delta);
+        break;
+
+      // Caller began speaking (server VAD) — signal barge-in so the transport can
+      // flush any already-sent bot audio it is still playing.
+      case "input_audio_buffer.speech_started":
+        this.callbacks.onBargeIn?.();
         break;
 
       // Model's spoken line transcript (assistant side) — log when complete.
