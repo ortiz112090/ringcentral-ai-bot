@@ -157,13 +157,18 @@ export async function escalateCall(
  * the realtime audio bridge can finalize live calls the same way the text path does.
  */
 export async function wrapUpCall(state: CallState, outcome: CallOutcome): Promise<void> {
+  // Remove the in-memory state synchronously, BEFORE awaiting the DB write. A
+  // concurrent duplicate teardown (e.g. the Twilio media-stream "stop" handler
+  // racing the realtime engine's onOutcome callback) then finds no state via
+  // getCallState and returns early — the primary dedupe against a double-finalize.
+  // We keep our own `state` reference for the write below.
+  endCallState(state.callId);
   await finalizeCallRecord(state.callId, {
     outcome,
     scriptStageReached: state.stage,
     transcript: state.transcript,
     endedAt: new Date().toISOString(),
   });
-  endCallState(state.callId);
   logger.info("Call finalized", { callId: state.callId, outcome, stage: state.stage });
 }
 

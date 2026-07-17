@@ -148,18 +148,48 @@ export async function finalizeCallRecord(
     endedAt?: string;
   }
 ): Promise<void> {
-  const { error } = await supabase
+  const update = {
+    outcome: fields.outcome,
+    script_stage_reached: fields.scriptStageReached ?? null,
+    transcript: fields.transcript ?? undefined,
+    ended_at: fields.endedAt ?? new Date().toISOString(),
+  };
+
+  // Backstop guard (mirrors closeCallIfLive): only finalize a row that is still
+  // live (ended_at NULL). If two teardown paths race, the FIRST terminal write
+  // wins and a later duplicate matches no rows instead of clobbering the outcome.
+  const { data, error } = await supabase
     .from("calls")
-    .update({
-      outcome: fields.outcome,
-      script_stage_reached: fields.scriptStageReached ?? null,
-      transcript: fields.transcript ?? undefined,
-      ended_at: fields.endedAt ?? new Date().toISOString(),
-    })
+    .update(update)
     .eq("bot_id", BOT_ID)
-    .eq("call_id", callId);
+    .eq("call_id", callId)
+    .is("ended_at", null)
+    .select("call_id");
   if (error) {
     logger.error("Failed to finalize call record", { callId, error: error.message });
+    return;
+  }
+  if (data && data.length > 0) {
+    return; // finalized the live row — done
+  }
+
+  // The row was already finalized by a concurrent teardown. "abandoned" is the
+  // weakest outcome and must NEVER overwrite a real terminal one, so bail out when
+  // that's what we're writing. Any stronger outcome (escalated, closed_*, ...) is
+  // allowed to upgrade a row the hangup path finalized first as 'abandoned'.
+  if (fields.outcome === "abandoned") {
+    return;
+  }
+
+  const { error: upgradeError } = await supabase
+    .from("calls")
+    .update(update)
+    .eq("bot_id", BOT_ID)
+    .eq("call_id", callId)
+    .eq("outcome", "abandoned")
+    .select("call_id");
+  if (upgradeError) {
+    logger.error("Failed to upgrade abandoned call record", { callId, error: upgradeError.message });
   }
 }
 
