@@ -86,9 +86,9 @@ export const config = {
     ttsVoice: optional("OPENAI_TTS_VOICE", "alloy"),
     embeddingModel: optional("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
     // ---- Realtime (speech-to-speech) voice pipeline ----
-    // Current stable/preview realtime model name. Update this single constant when
-    // OpenAI promotes a newer realtime model to GA.
-    realtimeModel: optional("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview"),
+    // GA realtime model name. The old "gpt-4o-realtime-preview" was retired with
+    // the Realtime Beta interface on 2026-05-12; GA uses "gpt-realtime-2.1".
+    realtimeModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1"),
     realtimeVoice: optional("OPENAI_REALTIME_VOICE", "alloy"),
     // Audio codec exchanged with the Realtime API. "g711_ulaw" (mu-law 8kHz) is
     // telephony-native and matches typical PSTN/RingCentral media, avoiding

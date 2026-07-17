@@ -126,10 +126,11 @@ export class RealtimeEngine {
           `OpenAI API key missing for tenant BOT_ID=${BOT_ID}; cannot open realtime session`
         );
       }
+      // GA interface: the "OpenAI-Beta: realtime=v1" header is gone — sending it now
+      // gets the connection rejected with beta_api_shape_disabled.
       this.ws = new WebSocket(REALTIME_URL, {
         headers: {
           Authorization: `Bearer ${apiKey}`,
-          "OpenAI-Beta": "realtime=v1",
         },
       });
     } catch (err) {
@@ -199,19 +200,29 @@ export class RealtimeEngine {
   }
 
   private sendSessionUpdate(lessons: Awaited<ReturnType<typeof retrieveRelevantLessons>>): void {
-    const fmt = config.openai.realtimeAudioFormat;
+    const audioFormat = gaAudioFormat(config.openai.realtimeAudioFormat);
+    // GA session shape: session.type is required, and audio config is nested under
+    // session.audio.{input,output} with the format as an object (not the old flat
+    // input_audio_format/output_audio_format strings). Output modalities are omitted
+    // so the GA default (audio + text) applies. See migration notes in the PR.
     this.send({
       type: "session.update",
       session: {
-        modalities: ["audio", "text"],
+        type: "realtime",
         instructions: buildRealtimeInstructions(this.state.lead, lessons),
-        voice: config.openai.realtimeVoice,
-        input_audio_format: fmt,
-        output_audio_format: fmt,
-        // Let the model transcribe caller speech so we can log a transcript.
-        input_audio_transcription: { model: "whisper-1" },
-        // Server-side VAD handles turn-taking (barge-in + end-of-speech detection).
-        turn_detection: { type: "server_vad" },
+        audio: {
+          input: {
+            format: audioFormat,
+            // Let the model transcribe caller speech so we can log a transcript.
+            transcription: { model: "whisper-1" },
+            // Server-side VAD handles turn-taking (barge-in + end-of-speech detection).
+            turn_detection: { type: "server_vad" },
+          },
+          output: {
+            format: audioFormat,
+            voice: config.openai.realtimeVoice,
+          },
+        },
         tools: TOOLS,
         tool_choice: "auto",
       },
@@ -234,7 +245,8 @@ export class RealtimeEngine {
         break;
 
       // Streamed output audio — forward immediately, do NOT buffer.
-      case "response.audio.delta":
+      // GA renamed response.audio.delta → response.output_audio.delta.
+      case "response.output_audio.delta":
         if (typeof event.delta === "string") this.callbacks.onBotAudio(event.delta);
         break;
 
@@ -245,7 +257,8 @@ export class RealtimeEngine {
         break;
 
       // Model's spoken line transcript (assistant side) — log when complete.
-      case "response.audio_transcript.done":
+      // GA renamed response.audio_transcript.done → response.output_audio_transcript.done.
+      case "response.output_audio_transcript.done":
         if (typeof event.transcript === "string" && event.transcript.trim()) {
           recordBotTurn(this.state, event.transcript.trim());
         }
@@ -382,6 +395,28 @@ export class RealtimeEngine {
     }
     this.terminal = true;
     await this.callbacks.onOutcome(outcome as CallOutcome);
+  }
+}
+
+/**
+ * Map the configured codec name to the GA audio-format object. The codec itself is
+ * unchanged (g711_ulaw is still the telephony-native mu-law), but GA expresses the
+ * format as an object with a MIME-style `type` instead of the old flat string:
+ *   g711_ulaw → { type: "audio/pcmu" }, g711_alaw → { type: "audio/pcma" },
+ *   pcm16     → { type: "audio/pcm", rate: 24000 }.
+ */
+function gaAudioFormat(codec: string): Record<string, unknown> {
+  switch (codec) {
+    case "g711_ulaw":
+      return { type: "audio/pcmu" };
+    case "g711_alaw":
+      return { type: "audio/pcma" };
+    case "pcm16":
+      return { type: "audio/pcm", rate: 24000 };
+    default:
+      // Unknown/explicit value: pass through as a GA format object so an operator
+      // can set a GA type directly via env without a code change.
+      return { type: codec };
   }
 }
 
