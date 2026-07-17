@@ -3,6 +3,8 @@ import { config } from "./config";
 import { logger } from "./logger";
 import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
+import { twilioVoiceRouter } from "./twilio/voiceWebhook";
+import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { ensureLogin } from "./ringcentral/client";
 import { ensureWebhookSubscription } from "./ringcentral/telephony";
 import { loadRemoteConfig } from "./db/remoteConfig";
@@ -13,9 +15,12 @@ async function main(): Promise<void> {
 
   // RingCentral posts JSON notifications; keep a healthy body limit for media metadata.
   app.use(express.json({ limit: "2mb" }));
+  // Twilio posts application/x-www-form-urlencoded call params to its voice webhook.
+  app.use(express.urlencoded({ extended: false }));
 
   app.use(healthRouter);
   app.use(webhookRouter);
+  app.use(twilioVoiceRouter);
 
   // Global error handler so a thrown error in a route never takes down the process.
   app.use(
@@ -30,6 +35,10 @@ async function main(): Promise<void> {
   const server = app.listen(config.port, () => {
     logger.info("Server listening", { port: config.port });
   });
+
+  // Attach the Twilio Media Streams WebSocket endpoint (/twilio/media) to the same
+  // HTTP server — no new port. Bridges inbound call audio to the Realtime engine.
+  attachTwilioMediaStream(server);
 
   // Warm the Supabase-backed config cache before anything reads it. Non-fatal:
   // on failure the bot proceeds on env vars alone. Never log secret values.

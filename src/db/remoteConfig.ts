@@ -73,6 +73,12 @@ export interface BotConfigRow {
   rc_main_number: string | null;
   /** This tenant's assigned RingCentral extension (dashboard-assigned). */
   rc_extension: string | null;
+  /** E.164 Twilio number for this bot's voice line (dashboard-assigned). */
+  twilio_number: string | null;
+  /** Active voice transport: 'ringcentral' (default) | 'twilio'. */
+  voice_provider: string | null;
+  /** E.164 number to dial when escalating to a human on the Twilio path. */
+  escalation_number: string | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */

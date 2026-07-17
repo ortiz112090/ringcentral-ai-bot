@@ -202,6 +202,19 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
         continue;
       }
 
+      // Voice provider gate: when this tenant answers voice via Twilio, RingCentral
+      // must NOT answer calls — Twilio Media Streams drives the audio bridge instead
+      // (RC forwards its number to the Twilio number). The RC subscription stays
+      // active for SMS. Default 'ringcentral' keeps the original answer behavior.
+      const { twilio: twilioCfg } = await resolveEffectiveConfig();
+      if (twilioCfg.voiceProvider === "twilio") {
+        logger.info("voice_provider=twilio; skipping RingCentral answer (Twilio handles voice)", {
+          sessionId,
+          callerNumber,
+        });
+        continue;
+      }
+
       // Kill switch: disabled when the tenant's bots row is missing/inactive or
       // bot_config.bot_enabled is false (see isBotEnabled). When disabled, hand the
       // call to the escalation queue if one is configured; otherwise ring through.

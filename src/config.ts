@@ -67,6 +67,15 @@ export const config = {
     webhookVerificationToken: optional("RINGCENTRAL_WEBHOOK_VERIFICATION_TOKEN", ""),
   },
 
+  // Twilio voice path. account_sid/auth_token are credentials (api_credentials
+  // provider "twilio"); env vars here are the fallback for the primary bot only,
+  // resolved env-first in resolveEffectiveConfig(). The number/voice_provider/
+  // escalation_number live in bot_config (per-tenant DB columns).
+  twilio: {
+    accountSid: optional("TWILIO_ACCOUNT_SID", ""),
+    authToken: optional("TWILIO_AUTH_TOKEN", ""),
+  },
+
   openai: {
     apiKey: optional("OPENAI_API_KEY", ""),
     // Chat model used for non-realtime text tasks (SMS script turns + learning
@@ -124,12 +133,40 @@ export interface EffectiveConfig {
   openai: {
     apiKey: string | undefined;
   };
+  twilio: {
+    accountSid: string | undefined;
+    authToken: string | undefined;
+    /** E.164 Twilio number that answers this tenant's voice line. */
+    number: string | undefined;
+    /** 'ringcentral' (default) | 'twilio'. */
+    voiceProvider: string;
+    /** E.164 number to <Dial> when escalating a Twilio call to a human. */
+    escalationNumber: string | undefined;
+  };
   business: {
     agentName: string;
     brokerageName: string;
   };
   realtimeVoice: string;
   escalationExtension: string | undefined;
+}
+
+/**
+ * Derive the public WebSocket URL Twilio Media Streams should connect back to,
+ * from PUBLIC_BASE_URL. "https://host" → "wss://host/twilio/media"; an http base
+ * maps to ws. Returns "" when PUBLIC_BASE_URL is unset so callers can detect the
+ * misconfiguration. The path is the ws endpoint mounted in index.ts.
+ */
+export function mediaStreamWssUrl(): string {
+  const base = config.publicBaseUrl.trim().replace(/\/$/, "");
+  if (!base) return "";
+  try {
+    const url = new URL(base);
+    const scheme = url.protocol === "http:" ? "ws:" : "wss:";
+    return `${scheme}//${url.host}/twilio/media`;
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -195,6 +232,17 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
     },
     openai: {
       apiKey: credentialFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
+    },
+    twilio: {
+      // Credentials: DB (api_credentials provider "twilio") first, env only for
+      // the primary bot (credentialFirst enforces the isolation rule).
+      accountSid: credentialFirst("TWILIO_ACCOUNT_SID", getCredential("twilio", "account_sid")),
+      authToken: credentialFirst("TWILIO_AUTH_TOKEN", getCredential("twilio", "auth_token")),
+      // Non-secret per-tenant DB columns; env-first like realtimeVoice/escalationExtension.
+      number: envFirst("TWILIO_NUMBER", botConfig?.twilio_number),
+      voiceProvider:
+        (envFirst("VOICE_PROVIDER", botConfig?.voice_provider) ?? "ringcentral").toLowerCase(),
+      escalationNumber: envFirst("TWILIO_ESCALATION_NUMBER", botConfig?.escalation_number),
     },
     business: {
       agentName: credentialFirst("AGENT_NAME", botConfig?.agent_name) ?? "Alex",
