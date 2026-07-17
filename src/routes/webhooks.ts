@@ -85,21 +85,35 @@ function normalizePhoneNumber(value: string | null | undefined): string {
  * Decide whether an inbound call's destination belongs to THIS tenant, based on
  * the dashboard-assigned `bot_config.rc_main_number` / `rc_extension`.
  *
- * Fail-open: if this tenant has neither a main number nor an extension configured,
- * we can't route by destination, so we accept the call (preserves legacy
- * single-number deployments). If at least one is set, the call must match it.
+ * Fail-CLOSED: if this tenant has neither a main number nor an extension
+ * configured, we can't prove the call is for us, so we REFUSE it. This prevents
+ * an unassigned bot (e.g. a dashboard bug that wiped rc_main_number/rc_extension
+ * to NULL) from answering calls destined for other numbers on a shared
+ * account-wide subscription. A bot with no assignment must never answer a call.
+ * If at least one field IS set, the call must match it.
  *
  * Extension matching is best-effort: RingCentral telephony party payloads do not
  * reliably expose the dialed extension on the `to` party, so when no extension
  * field is present on the destination we fall back to main-number matching only.
  */
-function callDestinationMatchesTenant(party: any): boolean {
+function callDestinationMatchesTenant(party: any, sessionId: string): boolean {
   const botConfig = getRemoteConfig().botConfig;
   const configuredNumber = normalizePhoneNumber(botConfig?.rc_main_number);
   const configuredExtension = (botConfig?.rc_extension ?? "").trim();
 
-  // Fail-open: nothing configured to route on.
-  if (!configuredNumber && !configuredExtension) return true;
+  // Fail-CLOSED: nothing configured to route on — refuse rather than answer
+  // calls that may belong to other numbers on this account.
+  if (!configuredNumber && !configuredExtension) {
+    logger.warn(
+      "Tenant has no rc_main_number/rc_extension assigned; refusing to process call to avoid answering calls for other numbers",
+      {
+        sessionId,
+        toNumber: party?.to?.phoneNumber ?? null,
+        toExtension: party?.to?.extensionNumber ?? null,
+      }
+    );
+    return false;
+  }
 
   const destNumber = normalizePhoneNumber(party?.to?.phoneNumber);
   // Best-effort: `extensionNumber` may be absent on the `to` party; when it is,
@@ -113,6 +127,40 @@ function callDestinationMatchesTenant(party: any): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * SMS counterpart to callDestinationMatchesTenant. The SMS event filter may still
+ * be account-wide (no reliably-scoped SMS filter), so we apply the same
+ * fail-CLOSED destination gate scoped to `rc_main_number`.
+ *
+ * The inbound SMS payload exposes destination number(s) on `to` (array of
+ * `{ phoneNumber }`). When rc_main_number is set we require one of the `to`
+ * numbers to match it. If rc_main_number is not set we refuse (fail closed),
+ * matching the call path. If the payload carries no usable `to` numbers we cannot
+ * prove ownership, so we also refuse.
+ */
+function smsDestinationMatchesTenant(messageBody: any): boolean {
+  const botConfig = getRemoteConfig().botConfig;
+  const configuredNumber = normalizePhoneNumber(botConfig?.rc_main_number);
+
+  if (!configuredNumber) {
+    logger.warn(
+      "Tenant has no rc_main_number/rc_extension assigned; refusing to process SMS to avoid handling messages for other numbers",
+      { from: messageBody?.from?.phoneNumber ?? null }
+    );
+    return false;
+  }
+
+  const toEntries: any[] = Array.isArray(messageBody?.to) ? messageBody.to : [];
+  const destNumbers = toEntries.map((t) => normalizePhoneNumber(t?.phoneNumber)).filter(Boolean);
+  if (destNumbers.length === 0) {
+    logger.warn("Inbound SMS has no usable destination number; refusing (fail closed)", {
+      from: messageBody?.from?.phoneNumber ?? null,
+    });
+    return false;
+  }
+  return destNumbers.includes(configuredNumber);
 }
 
 /**
@@ -143,8 +191,8 @@ async function handleTelephonyEvent(sessionBody: any): Promise<void> {
       // Tenant number/extension routing: this bot subscription may receive calls
       // for numbers that belong to a different tenant. Using the just-reloaded
       // config, only proceed when the call's destination matches this tenant's
-      // assigned rc_main_number/rc_extension. Fail-open when neither is set.
-      if (!callDestinationMatchesTenant(party)) {
+      // assigned rc_main_number/rc_extension. Fail-CLOSED when neither is set.
+      if (!callDestinationMatchesTenant(party, sessionId)) {
         logger.info("Inbound call destination not assigned to this tenant; skipping", {
           sessionId,
           callerNumber,
@@ -208,8 +256,14 @@ async function handleSmsEvent(messageBody: any): Promise<void> {
   if (!from || !text) return;
 
   logger.info("Inbound SMS received", { from });
-  // Refresh tenant config so the kill switch reflects the latest dashboard state.
+  // Refresh tenant config so routing + kill switch reflect the latest dashboard state.
   await loadRemoteConfig();
+  // Destination routing (fail closed): the SMS filter is account-wide, so ensure
+  // the message is actually addressed to this tenant's rc_main_number before we
+  // process it. An unassigned tenant refuses all SMS, mirroring the call path.
+  if (!smsDestinationMatchesTenant(messageBody)) {
+    return;
+  }
   // Kill switch: same gate as inbound calls — skip processing when disabled.
   if (!isBotEnabled()) {
     logger.info("Bot disabled; inbound SMS not processed", { from });

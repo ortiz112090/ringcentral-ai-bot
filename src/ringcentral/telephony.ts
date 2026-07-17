@@ -1,6 +1,7 @@
 import { config, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { rcGet, rcPost } from "./client";
+import { getRemoteConfig } from "../db/remoteConfig";
 
 /**
  * Thin helpers over RingCentral's Call Control (Telephony Sessions) API.
@@ -121,16 +122,59 @@ export async function sendSms(to: string, from: string, text: string): Promise<v
 }
 
 /**
+ * Resolve a dialable extension number (e.g. "957") to its RingCentral internal
+ * numeric extension id, which is what extension-scoped API paths require. Returns
+ * null when no enabled extension matches. Never logs secret values.
+ */
+async function resolveExtensionId(extensionNumber: string): Promise<string | null> {
+  const wanted = extensionNumber.trim();
+  if (!wanted) return null;
+  const res = await rcGet(`${ACCOUNT}/extension?status=Enabled&perPage=1000`);
+  const records: any[] = res?.records ?? [];
+  const match = records.find(
+    (r) => String(r?.extensionNumber ?? "").trim() === wanted
+  );
+  return match?.id != null ? String(match.id) : null;
+}
+
+/**
  * Create (or refresh) the RingCentral webhook subscription that pushes inbound
  * telephony + SMS events to this service's /webhooks/ringcentral endpoint.
  * Call once on startup after the public URL is known.
+ *
+ * SAFETY (production incident fix): the subscription is scoped to THIS tenant's
+ * assigned extension so the bot only receives events for its own number — an
+ * account-wide subscription previously caused the bot to answer calls across the
+ * entire account. If this tenant has no `rc_extension` assigned we create NO
+ * telephony subscription at all (and skip SMS too) rather than falling back to an
+ * account-wide filter. The runtime routing gate in webhooks.ts is the second,
+ * fail-closed line of defense.
  */
 export async function ensureWebhookSubscription(deliveryAddress: string): Promise<void> {
   try {
+    const rcExtension = (getRemoteConfig().botConfig?.rc_extension ?? "").trim();
+    if (!rcExtension) {
+      logger.warn(
+        "No rc_extension assigned for this tenant; skipping webhook subscription entirely " +
+          "(refusing account-wide fallback to avoid receiving other numbers' calls/SMS)"
+      );
+      return;
+    }
+
+    const extensionId = await resolveExtensionId(rcExtension);
+    if (!extensionId) {
+      logger.error(
+        "Could not resolve rc_extension to a RingCentral extension id; skipping webhook " +
+          "subscription (refusing account-wide fallback)",
+        { rcExtension }
+      );
+      return;
+    }
+
     const body = {
       eventFilters: [
-        "/restapi/v1.0/account/~/telephony/sessions",
-        "/restapi/v1.0/account/~/extension/~/message-store/instant?type=SMS",
+        `/restapi/v1.0/account/~/extension/${extensionId}/telephony/sessions`,
+        `/restapi/v1.0/account/~/extension/${extensionId}/message-store/instant?type=SMS`,
       ],
       deliveryMode: {
         transportType: "WebHook",
@@ -142,7 +186,11 @@ export async function ensureWebhookSubscription(deliveryAddress: string): Promis
       expiresIn: 604800, // 7 days; RingCentral requires periodic renewal.
     };
     const result = await rcPost(`${ACCOUNT.replace("/account/~", "")}/subscription`, body);
-    logger.info("Webhook subscription active", { id: result.id, address: deliveryAddress });
+    logger.info("Webhook subscription active (extension-scoped)", {
+      id: result.id,
+      address: deliveryAddress,
+      extensionId,
+    });
   } catch (err) {
     logger.error("Failed to create webhook subscription", {
       error: err instanceof Error ? err.message : String(err),
