@@ -1,6 +1,6 @@
 import { config, resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
-import { rcGet, rcPost } from "./client";
+import { rcGet, rcPost, rcDelete } from "./client";
 import { getRemoteConfig } from "../db/remoteConfig";
 
 /**
@@ -17,6 +17,24 @@ import { getRemoteConfig } from "../db/remoteConfig";
  */
 
 const ACCOUNT = "/restapi/v1.0/account/~";
+
+// Account-level subscription collection (not scoped under /account/~).
+const SUBSCRIPTION_BASE = "/restapi/v1.0/subscription";
+
+// Renewal timing knobs. We renew well before the 7-day expiry so a webhook never
+// silently dies. Floor guards against a tight loop if expirationTime is oddly near.
+const RENEW_FLOOR_MS = 5 * 60 * 1000; // 5 minutes
+const RENEW_LEAD_MS = 24 * 60 * 60 * 1000; // renew at least 24h before expiry
+
+// Matches an account-wide telephony filter — `/account/<anything>/telephony/sessions`
+// where the account segment is followed DIRECTLY by /telephony (i.e. NOT an
+// extension-scoped `/account/~/extension/{id}/telephony/sessions`). These are the
+// dangerous leftovers from the old account-wide subscription code.
+const ACCOUNT_WIDE_TELEPHONY_RE = /\/account\/[^/]+\/telephony\/sessions/;
+
+// Single module-level renewal timer so repeated ensureWebhookSubscription() calls
+// never stack multiple renew loops.
+let renewalTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Answer an inbound call leg. */
 export async function answerCall(sessionId: string, partyId: string): Promise<void> {
@@ -138,9 +156,171 @@ async function resolveExtensionId(extensionNumber: string): Promise<string | nul
 }
 
 /**
+ * True when two webhook delivery addresses point at the same service endpoint
+ * (same host + path). Query string / protocol differences are ignored so a
+ * re-registration of our own endpoint is still recognized as ours. Falls back to
+ * exact string equality if either value isn't a parseable URL.
+ */
+function sameWebhookTarget(candidate: string | undefined, ours: string): boolean {
+  if (!candidate) return false;
+  try {
+    const a = new URL(candidate);
+    const b = new URL(ours);
+    return a.host === b.host && a.pathname === b.pathname;
+  } catch {
+    return candidate === ours;
+  }
+}
+
+/**
+ * Self-healing startup cleanup. Lists every subscription on the account and
+ * deletes the ones that are stale or dangerous, so a blacklisted or leftover
+ * account-wide registration can't keep failing (RingCentral blacklists endpoints
+ * after repeated delivery failures) or route other numbers' calls to us.
+ *
+ * A subscription is deleted ONLY if it matches at least one of:
+ *   (a) status "Blacklisted", OR
+ *   (b) a WebHook whose delivery address is THIS service's webhook endpoint
+ *       (our own stale prior registration), OR
+ *   (c) its eventFilters include an account-wide `/telephony/sessions` filter
+ *       (a dangerous leftover from the old account-wide code).
+ *
+ * Everything else is left untouched — e.g. a healthy Active subscription scoped
+ * to a different extension with a different delivery address may legitimately
+ * belong to another bot tenant on this same RingCentral account.
+ *
+ * Each delete is isolated in its own try/catch so one failure never blocks the
+ * rest, and a failure to LIST is non-fatal (we log and proceed to create fresh).
+ */
+async function cleanupStaleSubscriptions(deliveryAddress: string): Promise<void> {
+  let records: any[] = [];
+  try {
+    const res = await rcGet(SUBSCRIPTION_BASE);
+    records = Array.isArray(res?.records) ? res.records : [];
+  } catch (err) {
+    logger.error("Failed to list subscriptions for cleanup; proceeding to create fresh one", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  for (const sub of records) {
+    const status = sub?.status;
+    const transportType = sub?.deliveryMode?.transportType;
+    const address = sub?.deliveryMode?.address;
+    const eventFilters: string[] = Array.isArray(sub?.eventFilters) ? sub.eventFilters : [];
+
+    const isBlacklisted = status === "Blacklisted";
+    const isOurs = transportType === "WebHook" && sameWebhookTarget(address, deliveryAddress);
+    const isAccountWideTelephony = eventFilters.some((f) => ACCOUNT_WIDE_TELEPHONY_RE.test(f));
+
+    if (!isBlacklisted && !isOurs && !isAccountWideTelephony) continue;
+
+    const reason = [
+      isBlacklisted ? "blacklisted" : null,
+      isOurs ? "our-stale-address" : null,
+      isAccountWideTelephony ? "account-wide-telephony" : null,
+    ]
+      .filter(Boolean)
+      .join(",");
+
+    try {
+      await rcDelete(`${SUBSCRIPTION_BASE}/${sub.id}`);
+      logger.info("Deleted stale/dangerous webhook subscription", {
+        id: sub?.id,
+        status,
+        reason,
+        eventFilters,
+      });
+    } catch (err) {
+      logger.error("Failed to delete stale subscription (continuing with others)", {
+        id: sub?.id,
+        status,
+        reason,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Schedule the next renewal well before the subscription expires. Renews at 80%
+ * of the remaining lifetime OR 24h before expiry, whichever comes SOONER, with a
+ * 5-minute floor so an unexpectedly-near expirationTime can't cause a tight loop.
+ * The timer is unref()'d so it never keeps the process alive during shutdown, and
+ * any previously-scheduled timer is cleared first (single renewal loop).
+ */
+function scheduleRenewal(
+  subscriptionId: string,
+  expirationTime: string | undefined,
+  deliveryAddress: string
+): void {
+  if (renewalTimer) {
+    clearTimeout(renewalTimer);
+    renewalTimer = null;
+  }
+  if (!subscriptionId || !expirationTime) {
+    logger.warn("Cannot schedule subscription renewal: missing id or expirationTime", {
+      subscriptionId,
+      expirationTime,
+    });
+    return;
+  }
+  const expiresAtMs = new Date(expirationTime).getTime();
+  if (Number.isNaN(expiresAtMs)) {
+    logger.warn("Cannot schedule subscription renewal: unparseable expirationTime", {
+      expirationTime,
+    });
+    return;
+  }
+  const remainingMs = expiresAtMs - Date.now();
+  const delayMs = Math.max(
+    RENEW_FLOOR_MS,
+    Math.min(remainingMs * 0.8, remainingMs - RENEW_LEAD_MS)
+  );
+  renewalTimer = setTimeout(() => {
+    void renewSubscription(subscriptionId, deliveryAddress);
+  }, delayMs);
+  renewalTimer.unref();
+  logger.info("Scheduled webhook subscription renewal", {
+    subscriptionId,
+    expirationTime,
+    renewInHours: Math.round((delayMs / 3_600_000) * 10) / 10,
+  });
+}
+
+/**
+ * Renew an existing subscription via POST /restapi/v1.0/subscription/{id}/renew
+ * (confirmed valid + non-deprecated in the RingCentral webhooks guide; a PUT to
+ * /subscription/{id} is an equivalent alternative). On success we reschedule the
+ * next renewal from the fresh expirationTime. On failure (e.g. the subscription
+ * was deleted or blacklisted in the meantime) we fall back to the full
+ * ensureWebhookSubscription flow (cleanup + recreate).
+ */
+async function renewSubscription(subscriptionId: string, deliveryAddress: string): Promise<void> {
+  try {
+    const result = await rcPost(`${SUBSCRIPTION_BASE}/${subscriptionId}/renew`, {});
+    logger.info("Renewed webhook subscription", {
+      subscriptionId,
+      expirationTime: result?.expirationTime,
+    });
+    scheduleRenewal(result?.id ?? subscriptionId, result?.expirationTime, deliveryAddress);
+  } catch (err) {
+    logger.error("Subscription renewal failed; recreating (cleanup + create)", {
+      subscriptionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await ensureWebhookSubscription(deliveryAddress);
+  }
+}
+
+/**
  * Create (or refresh) the RingCentral webhook subscription that pushes inbound
  * telephony + SMS events to this service's /webhooks/ringcentral endpoint.
  * Call once on startup after the public URL is known.
+ *
+ * Order: (1) clean up stale/dangerous subscriptions on the account, then (2)
+ * create the fresh extension-scoped subscription, then (3) schedule renewal.
  *
  * SAFETY (production incident fix): the subscription is scoped to THIS tenant's
  * assigned extension so the bot only receives events for its own number — an
@@ -152,6 +332,10 @@ async function resolveExtensionId(extensionNumber: string): Promise<string | nul
  */
 export async function ensureWebhookSubscription(deliveryAddress: string): Promise<void> {
   try {
+    // Self-healing: purge blacklisted / our own stale / dangerous account-wide
+    // subscriptions first, regardless of assignment, so leftovers can't linger.
+    await cleanupStaleSubscriptions(deliveryAddress);
+
     const rcExtension = (getRemoteConfig().botConfig?.rc_extension ?? "").trim();
     if (!rcExtension) {
       logger.warn(
@@ -185,12 +369,14 @@ export async function ensureWebhookSubscription(deliveryAddress: string): Promis
       },
       expiresIn: 604800, // 7 days; RingCentral requires periodic renewal.
     };
-    const result = await rcPost(`${ACCOUNT.replace("/account/~", "")}/subscription`, body);
+    const result = await rcPost(SUBSCRIPTION_BASE, body);
     logger.info("Webhook subscription active (extension-scoped)", {
       id: result.id,
       address: deliveryAddress,
       extensionId,
+      expirationTime: result.expirationTime,
     });
+    scheduleRenewal(result.id, result.expirationTime, deliveryAddress);
   } catch (err) {
     logger.error("Failed to create webhook subscription", {
       error: err instanceof Error ? err.message : String(err),
