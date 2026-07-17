@@ -151,22 +151,51 @@ export interface EffectiveConfig {
   escalationExtension: string | undefined;
 }
 
+/** Trimmed PUBLIC_BASE_URL with any trailing slash removed, or "" when unset. */
+function publicBase(): string {
+  return config.publicBaseUrl.trim().replace(/\/$/, "");
+}
+
 /**
- * Derive the public WebSocket URL Twilio Media Streams should connect back to,
- * from PUBLIC_BASE_URL. "https://host" → "wss://host/twilio/media"; an http base
- * maps to ws. Returns "" when PUBLIC_BASE_URL is unset so callers can detect the
- * misconfiguration. The path is the ws endpoint mounted in index.ts.
+ * Derive the per-call public WebSocket URL Twilio Media Streams should connect
+ * back to, from PUBLIC_BASE_URL. "https://host" → "wss://host/media/{callSid}";
+ * an http base maps to ws. The path is now per-call (/media/{callSid}) per the
+ * Twilio-native rebuild spec — the media endpoint (attached in index.ts) matches
+ * this prefix and the per-call HMAC stream token is still passed as a <Parameter>.
+ * Returns "" when PUBLIC_BASE_URL is unset so callers can detect the
+ * misconfiguration and fail closed.
  */
-export function mediaStreamWssUrl(): string {
-  const base = config.publicBaseUrl.trim().replace(/\/$/, "");
-  if (!base) return "";
+export function mediaStreamWssUrl(callSid: string): string {
+  const base = publicBase();
+  if (!base || !callSid) return "";
   try {
     const url = new URL(base);
     const scheme = url.protocol === "http:" ? "ws:" : "wss:";
-    return `${scheme}//${url.host}/twilio/media`;
+    return `${scheme}//${url.host}/media/${encodeURIComponent(callSid)}`;
   } catch {
     return "";
   }
+}
+
+/**
+ * Public URL Twilio POSTs inbound-call params to (the voice webhook). Used both
+ * for X-Twilio-Signature validation and for auto-provisioning the number's
+ * VoiceUrl. Returns "" when PUBLIC_BASE_URL is unset.
+ */
+export function twilioVoiceWebhookUrl(): string {
+  const base = publicBase();
+  return base ? `${base}/webhooks/twilio/voice` : "";
+}
+
+/**
+ * Public URL Twilio POSTs call status callbacks to (event 'completed' at
+ * minimum), so a call row still closes even if the media WebSocket dies without a
+ * clean "stop". Set on the number config during provisioning. Returns "" when
+ * PUBLIC_BASE_URL is unset.
+ */
+export function twilioStatusCallbackUrl(): string {
+  const base = publicBase();
+  return base ? `${base}/webhooks/twilio/status` : "";
 }
 
 /**

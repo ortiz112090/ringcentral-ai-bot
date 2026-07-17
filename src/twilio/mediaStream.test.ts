@@ -195,4 +195,21 @@ describe("Twilio media stream token authentication", () => {
     expect(endCallBridge).not.toHaveBeenCalled();
     expect(onCallEnded).not.toHaveBeenCalled();
   });
+
+  it("path CallSid matching the start frame → starts the bridge", async () => {
+    const socket = fakeSocket();
+    const session = createMediaSession(socket, "CA456");
+    await session.onMessage(startFrame({ callSid: "CA456" }));
+    expect(startCallBridge).toHaveBeenCalledTimes(1);
+  });
+
+  it("path CallSid != start-frame CallSid → closes without starting a bridge", async () => {
+    const socket = fakeSocket();
+    // Connection opened on /media/CA999 but the start frame (with a valid token for
+    // CA456) claims CA456 — reject on the path/frame mismatch.
+    const session = createMediaSession(socket, "CA999");
+    await session.onMessage(startFrame({ callSid: "CA456" }));
+    expect(startCallBridge).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(1);
+  });
 });
