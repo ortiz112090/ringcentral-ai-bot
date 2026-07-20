@@ -9,8 +9,12 @@ import {
   upsertLead,
   setRealtimeSessionId,
   getLeadFields,
+  getScriptStages,
+  getScriptConstraints,
   mergeCapturedData,
   type LeadFieldRow,
+  type ScriptStageRow,
+  type ScriptConstraintRow,
 } from "../db/queries";
 import { CallOutcome, Carrier } from "../db/types";
 
@@ -309,6 +313,48 @@ export function buildTranscriptionConfig(
 }
 
 /**
+ * Supported GA realtime voices. session.update.audio.output.voice must be one of
+ * these; anything else gets the connection rejected. Kept lowercase for a
+ * case-insensitive match against the per-call effective voice.
+ */
+export const SUPPORTED_REALTIME_VOICES = [
+  "marin",
+  "cedar",
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "sage",
+  "shimmer",
+  "verse",
+] as const;
+
+/** Fallback voice when the configured one is unsupported/empty. */
+const DEFAULT_REALTIME_VOICE = "cedar";
+
+/**
+ * Validate the per-call effective realtime voice against the supported GA list
+ * (case-insensitive). Returns the normalized (lowercase) supported voice, or the
+ * "cedar" fallback — logging a warning — when it's empty/unsupported so a stale or
+ * bad bot_config value can never get the realtime session rejected.
+ */
+export function resolveRealtimeVoice(voice: string | null | undefined): string {
+  const normalized = typeof voice === "string" ? voice.trim().toLowerCase() : "";
+  if (
+    normalized !== "" &&
+    (SUPPORTED_REALTIME_VOICES as readonly string[]).includes(normalized)
+  ) {
+    return normalized;
+  }
+  logger.warn("Unsupported realtime voice; falling back", {
+    requested: voice ?? null,
+    fallback: DEFAULT_REALTIME_VOICE,
+  });
+  return DEFAULT_REALTIME_VOICE;
+}
+
+/**
  * Build the GA server-VAD turn_detection object from the effective voice config.
  * A higher threshold and longer silence window make the bot far less likely to
  * treat phone-line breath/background noise as the caller taking a turn.
@@ -340,6 +386,12 @@ export class RealtimeEngine {
   );
   /** When false, caller speech does not flush/interrupt the bot's outgoing audio. */
   private bargeInEnabled = true;
+  /** Per-call effective realtime voice (validated GA voice; defaults to fallback). */
+  private realtimeVoice: string = DEFAULT_REALTIME_VOICE;
+  /** Active dashboard script stages for this bot (empty → hardcoded fallback script). */
+  private scriptStages: ScriptStageRow[] = [];
+  /** Active dashboard script constraints for this bot (rendered into HARD RULES). */
+  private scriptConstraints: ScriptConstraintRow[] = [];
 
   constructor(
     private readonly state: CallState,
@@ -357,6 +409,10 @@ export class RealtimeEngine {
       const effective = await resolveEffectiveConfig();
       this.turnDetection = buildTurnDetection(effective.voice);
       this.bargeInEnabled = effective.voice.bargeInEnabled;
+      // Store the per-call effective voice (validated against the supported GA
+      // voices; falls back to "cedar" on empty/unsupported) so session.update sends
+      // THIS voice rather than the static env-only module config.
+      this.realtimeVoice = resolveRealtimeVoice(effective.realtimeVoice);
 
       // Build the capture_lead_info schema from this bot's active lead_fields. On any
       // failure/empty result we fall back to the hardcoded schema so the call flow is
@@ -373,6 +429,13 @@ export class RealtimeEngine {
       }
       this.leadFields = leadFields;
       this.captureLeadTool = buildCaptureLeadTool(leadFields);
+
+      // Load the dashboard-authored script (stages + constraints) so live calls
+      // follow the "Training & Learning" script instead of the hardcoded one. Both
+      // queries return [] on error, so an empty result simply keeps the hardcoded
+      // fallback script; a failure never breaks the call.
+      this.scriptStages = await getScriptStages(BOT_ID);
+      this.scriptConstraints = await getScriptConstraints(BOT_ID);
       // Reuse the same leadFields to bias the input transcriber toward this bot's
       // field labels on top of the static SR22 vocabulary.
       this.transcriptionConfig = buildTranscriptionConfig(
@@ -469,7 +532,12 @@ export class RealtimeEngine {
       type: "session.update",
       session: {
         type: "realtime",
-        instructions: buildRealtimeInstructions(this.state.lead, lessons),
+        instructions: buildRealtimeInstructions(
+          this.state.lead,
+          lessons,
+          this.scriptStages,
+          this.scriptConstraints
+        ),
         audio: {
           input: {
             format: audioFormat,
@@ -486,7 +554,7 @@ export class RealtimeEngine {
           },
           output: {
             format: audioFormat,
-            voice: config.openai.realtimeVoice,
+            voice: this.realtimeVoice,
           },
         },
         tools: [this.captureLeadTool, ...STATIC_TOOLS],

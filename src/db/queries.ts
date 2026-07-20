@@ -292,6 +292,69 @@ export async function mergeCapturedData(
   }
 }
 
+/** A dashboard-authored script stage (script_stages table), scoped to a bot. */
+export interface ScriptStageRow {
+  stage_key: string;
+  stage_order: number | null;
+  stage_type:
+    | "opener"
+    | "qualify"
+    | "data_collection"
+    | "quote"
+    | "close"
+    | "objection"
+    | "fallback"
+    | string;
+  title: string | null;
+  script_text: string | null;
+}
+
+/** A dashboard-authored script constraint (script_constraints table), scoped to a bot. */
+export interface ScriptConstraintRow {
+  rule_text: string | null;
+  severity: string | null;
+}
+
+/**
+ * Read this bot's ACTIVE script stages ordered by stage_order, used to build the
+ * live-call instructions from the dashboard "Training & Learning" script. Failure-
+ * tolerant: on any error returns an empty array so the caller falls back to the
+ * hardcoded script and the call flow is never broken (mirrors getLeadFields).
+ */
+export async function getScriptStages(botId: string = BOT_ID): Promise<ScriptStageRow[]> {
+  const { data, error } = await supabase
+    .from("script_stages")
+    .select("stage_key, stage_order, stage_type, title, script_text")
+    .eq("bot_id", botId)
+    .eq("active", true)
+    .order("stage_order", { ascending: true });
+  if (error) {
+    logger.error("Failed to load script stages", { botId, error: error.message });
+    return [];
+  }
+  return (data as ScriptStageRow[]) ?? [];
+}
+
+/**
+ * Read this bot's ACTIVE script constraints, rendered into the HARD RULES section
+ * of the live-call instructions. Failure-tolerant: on any error returns an empty
+ * array so the built-in hard rules still apply and the call flow is never broken.
+ */
+export async function getScriptConstraints(
+  botId: string = BOT_ID
+): Promise<ScriptConstraintRow[]> {
+  const { data, error } = await supabase
+    .from("script_constraints")
+    .select("rule_text, severity")
+    .eq("bot_id", botId)
+    .eq("active", true);
+  if (error) {
+    logger.error("Failed to load script constraints", { botId, error: error.message });
+    return [];
+  }
+  return (data as ScriptConstraintRow[]) ?? [];
+}
+
 /** A resolved webhook lead-destination (from lead_destinations.config). */
 export interface WebhookDestination {
   url: string;
