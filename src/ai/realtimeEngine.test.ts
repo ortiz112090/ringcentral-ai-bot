@@ -65,7 +65,7 @@ const effectiveVoice = {
   bargeInEnabled: true,
 };
 const resolveEffectiveConfig = vi.fn(async () => ({
-  openai: { apiKey: "test-key" },
+  openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
   voice: { ...effectiveVoice },
 }));
 vi.mock("../config", async () => {
@@ -80,6 +80,8 @@ import {
   RealtimeEngine,
   buildCaptureLeadTool,
   buildTurnDetection,
+  buildTranscriptionConfig,
+  STATIC_TRANSCRIPTION_VOCAB,
   type RealtimeCallbacks,
 } from "./realtimeEngine";
 import { config } from "../config";
@@ -141,7 +143,7 @@ beforeEach(() => {
   getLeadFields.mockResolvedValue([]);
   mergeCapturedData.mockResolvedValue(undefined);
   resolveEffectiveConfig.mockResolvedValue({
-    openai: { apiKey: "test-key" },
+    openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
     voice: { ...effectiveVoice },
   } as any);
 });
@@ -183,7 +185,13 @@ describe("RealtimeEngine GA wire protocol", () => {
       silence_duration_ms: 800,
       prefix_padding_ms: 300,
     });
-    expect(session.audio.input.transcription).toEqual({ model: "whisper-1" });
+    // GA input transcription now uses gpt-4o-transcribe + English + a vocab prompt.
+    expect(session.audio.input.transcription.model).toBe("gpt-4o-transcribe");
+    expect(session.audio.input.transcription.language).toBe("en");
+    expect(typeof session.audio.input.transcription.prompt).toBe("string");
+    expect(session.audio.input.transcription.prompt).toContain("SR22");
+    // OpenAI server-side input noise reduction is nested under audio.input (GA shape).
+    expect(session.audio.input.noise_reduction).toEqual({ type: "near_field" });
   });
 
   it("forwards GA output audio deltas to onBotAudio", async () => {
@@ -231,6 +239,59 @@ describe("buildTurnDetection", () => {
       silence_duration_ms: 1200,
       prefix_padding_ms: 250,
     });
+  });
+});
+
+describe("buildTranscriptionConfig", () => {
+  const field = (label: string | null): any => ({
+    field_key: "k",
+    label,
+    description: null,
+    field_type: "text",
+    choices: null,
+    required: false,
+    sort_order: 1,
+  });
+
+  it("uses the default model + static vocab only when there are no fields", () => {
+    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", []);
+    expect(cfg).toEqual({
+      model: "gpt-4o-transcribe",
+      language: "en",
+      prompt: STATIC_TRANSCRIPTION_VOCAB,
+    });
+  });
+
+  it("appends active lead-field labels to the vocabulary prompt", () => {
+    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", [
+      field("Start timeline"),
+      field("Vehicle year"),
+    ]);
+    expect(cfg.model).toBe("gpt-4o-transcribe");
+    expect(cfg.language).toBe("en");
+    expect(cfg.prompt).toContain(STATIC_TRANSCRIPTION_VOCAB);
+    expect(cfg.prompt).toContain("Start timeline");
+    expect(cfg.prompt).toContain("Vehicle year");
+  });
+
+  it("ignores empty/whitespace-only labels", () => {
+    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", [
+      field(""),
+      field("   "),
+      field(null),
+    ]);
+    expect(cfg.prompt).toBe(STATIC_TRANSCRIPTION_VOCAB);
+  });
+
+  it("truncates the prompt to <= ~500 chars when labels are long", () => {
+    const many = Array.from({ length: 100 }, (_, i) => field(`Field label number ${i}`));
+    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", many);
+    expect(cfg.prompt.length).toBeLessThanOrEqual(500);
+  });
+
+  it("passes the model name through unchanged (env override lands here)", () => {
+    const cfg = buildTranscriptionConfig("custom-transcribe-model", []);
+    expect(cfg.model).toBe("custom-transcribe-model");
   });
 });
 

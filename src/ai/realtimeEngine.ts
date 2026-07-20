@@ -179,6 +179,41 @@ export function buildCaptureLeadTool(fields: LeadFieldRow[]): Record<string, unk
 }
 
 /**
+ * Static vocabulary hint for the input transcriber. Biases the model toward the
+ * insurance/SR22 terms and PII shapes it hears on these calls; per-tenant
+ * lead_field labels are appended at call start (see buildTranscriptionConfig).
+ */
+export const STATIC_TRANSCRIPTION_VOCAB =
+  "Phone call about SR22 auto insurance. Expect terms like: SR22, Progressive, Dairyland, ZIP code, driver's license number, date of birth, quote, paid in full, monthly payment";
+
+/** Keep the transcription prompt well under the model's short-hint budget. */
+const TRANSCRIPTION_PROMPT_MAX = 500;
+
+/**
+ * Build the GA `session.audio.input.transcription` object: the configured model,
+ * English, and a vocabulary prompt = the static SR22 hint plus this bot's active
+ * lead_field labels (reusing the same leadFields loaded for buildCaptureLeadTool).
+ * Pure + exported so it's unit-testable. Empty/label-less fields fall back to the
+ * static sentence alone; the final prompt is truncated to <= ~500 chars.
+ */
+export function buildTranscriptionConfig(
+  model: string,
+  leadFields: LeadFieldRow[]
+): { model: string; language: string; prompt: string } {
+  let prompt = STATIC_TRANSCRIPTION_VOCAB;
+  const labels = (leadFields ?? [])
+    .map((f) => (typeof f.label === "string" ? f.label.trim() : ""))
+    .filter((l) => l !== "");
+  if (labels.length > 0) {
+    prompt = `${STATIC_TRANSCRIPTION_VOCAB}. Lead fields: ${labels.join(", ")}`;
+    if (prompt.length > TRANSCRIPTION_PROMPT_MAX) {
+      prompt = prompt.slice(0, TRANSCRIPTION_PROMPT_MAX).trimEnd();
+    }
+  }
+  return { model, language: "en", prompt };
+}
+
+/**
  * Build the GA server-VAD turn_detection object from the effective voice config.
  * A higher threshold and longer silence window make the bot far less likely to
  * treat phone-line breath/background noise as the caller taking a turn.
@@ -201,6 +236,11 @@ export class RealtimeEngine {
   private captureLeadTool: Record<string, unknown> = { ...FALLBACK_CAPTURE_LEAD_TOOL };
   /** server-VAD turn_detection built from the effective voice config. */
   private turnDetection: Record<string, unknown> = { type: "server_vad" };
+  /** input transcription config (model + language + vocabulary prompt). */
+  private transcriptionConfig: Record<string, unknown> = buildTranscriptionConfig(
+    "gpt-4o-transcribe",
+    []
+  );
   /** When false, caller speech does not flush/interrupt the bot's outgoing audio. */
   private bargeInEnabled = true;
 
@@ -235,6 +275,12 @@ export class RealtimeEngine {
         });
       }
       this.captureLeadTool = buildCaptureLeadTool(leadFields);
+      // Reuse the same leadFields to bias the input transcriber toward this bot's
+      // field labels on top of the static SR22 vocabulary.
+      this.transcriptionConfig = buildTranscriptionConfig(
+        effective.openai.transcribeModel,
+        leadFields
+      );
 
       const apiKey = effective.openai.apiKey;
       if (!apiKey) {
@@ -329,8 +375,12 @@ export class RealtimeEngine {
         audio: {
           input: {
             format: audioFormat,
-            // Let the model transcribe caller speech so we can log a transcript.
-            transcription: { model: "whisper-1" },
+            // Transcribe caller speech (gpt-4o-transcribe + English + SR22/lead-field
+            // vocabulary hint) — far more accurate than whisper-1 on 8kHz phone audio.
+            transcription: this.transcriptionConfig,
+            // OpenAI server-side input noise reduction. near_field suits a handset/
+            // headset caller close to the mic (vs far_field for speakerphone/room).
+            noise_reduction: { type: "near_field" },
             // Server-side VAD handles turn-taking (barge-in + end-of-speech detection),
             // tuned per-tenant from bot_config so phone-line breath/noise doesn't cut
             // the bot off. See buildTurnDetection.
