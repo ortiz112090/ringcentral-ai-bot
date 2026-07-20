@@ -178,37 +178,132 @@ export function buildCaptureLeadTool(fields: LeadFieldRow[]): Record<string, unk
   };
 }
 
+/** Outcome of validating a capture_lead_info payload against its lead_fields. */
+export interface CapturedValidation {
+  /** Keys that passed validation, with their (normalized) values — safe to persist. */
+  valid: Record<string, unknown>;
+  /** Keys that failed, mapped to a short human-readable reason. */
+  invalid: Record<string, string>;
+}
+
+/** True when a field is a ZIP code by key or label ("ZIP" appears in the label). */
+function isZipField(field: LeadFieldRow | undefined, key: string): boolean {
+  if (key === "zip_code") return true;
+  const label = typeof field?.label === "string" ? field.label.toLowerCase() : "";
+  return label.includes("zip");
+}
+
 /**
- * Static vocabulary hint for the input transcriber. Biases the model toward the
- * insurance/SR22 terms and PII shapes it hears on these calls; per-tenant
- * lead_field labels are appended at call start (see buildTranscriptionConfig).
+ * Validate ONE captured value against its lead_fields definition. Returns either the
+ * normalized value to store or a rejection reason. The ZIP rule takes precedence over
+ * field_type (a ZIP field may be typed text or number). Keys with no matching field
+ * definition are treated as free-form text.
+ */
+function validateOne(
+  field: LeadFieldRow | undefined,
+  key: string,
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  if (value === undefined || value === null) {
+    return { ok: false, reason: "no value provided" };
+  }
+
+  if (isZipField(field, key)) {
+    const digits = (String(value).match(/\d/g) ?? []).length;
+    return digits === 5
+      ? { ok: true, value }
+      : { ok: false, reason: "must be a 5-digit ZIP code" };
+  }
+
+  const type = field?.field_type ?? "text";
+
+  if (type === "number") {
+    const cleaned = String(value).replace(/[$,]/g, "").trim();
+    const n = Number(cleaned);
+    return cleaned !== "" && Number.isFinite(n)
+      ? { ok: true, value: n }
+      : { ok: false, reason: "must be a number" };
+  }
+
+  if (type === "date") {
+    return !Number.isNaN(Date.parse(String(value)))
+      ? { ok: true, value }
+      : { ok: false, reason: "must be a valid date" };
+  }
+
+  if (type === "choice" && Array.isArray(field?.choices) && field!.choices!.length > 0) {
+    const match = field!.choices!.find(
+      (c) => String(c).toLowerCase() === String(value).trim().toLowerCase()
+    );
+    return match !== undefined
+      ? { ok: true, value: match }
+      : { ok: false, reason: `must be one of: ${field!.choices!.join(", ")}` };
+  }
+
+  // text (and choice with no configured choices, and unknown keys): reject empty /
+  // whitespace-only, and values containing no letters or digits at all.
+  const str = String(value).trim();
+  if (str === "" || !/[a-zA-Z0-9]/.test(str)) {
+    return { ok: false, reason: "must contain letters or digits" };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Server-side validation of a capture_lead_info payload against the loaded lead_fields
+ * definitions. Pure + exported for unit testing. Splits the submitted values into the
+ * keys that passed (`valid`, with normalized values) and the keys that failed
+ * (`invalid`, key → reason) so callers can merge ONLY the valid keys and re-ask the
+ * model for the rest. See the spec's per-type rules (number/date/choice/zip/text).
+ */
+export function validateCapturedValues(
+  fields: LeadFieldRow[],
+  values: Record<string, unknown>
+): CapturedValidation {
+  const byKey = new Map<string, LeadFieldRow>();
+  for (const f of fields ?? []) {
+    if (f.field_key) byKey.set(f.field_key, f);
+  }
+
+  const valid: Record<string, unknown> = {};
+  const invalid: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values ?? {})) {
+    const result = validateOne(byKey.get(key), key, value);
+    if (result.ok) valid[key] = result.value;
+    else invalid[key] = result.reason;
+  }
+  return { valid, invalid };
+}
+
+/**
+ * Vocabulary hint for the input transcriber. Deliberately a short, plain
+ * natural-language SENTENCE (not a keyword list, and no per-tenant lead-field
+ * label list): a terse "term dump" prompt made the transcription model echo the
+ * prompt VERBATIM into caller transcript rows when the caller audio was brief or
+ * noisy. A fluent sentence biases toward the SR22/PII shapes without inviting the
+ * model to parrot it back. Kept short on purpose (see TRANSCRIPTION_PROMPT_MAX).
  */
 export const STATIC_TRANSCRIPTION_VOCAB =
-  "Phone call about SR22 auto insurance. Expect terms like: SR22, Progressive, Dairyland, ZIP code, driver's license number, date of birth, quote, paid in full, monthly payment";
+  "The caller is discussing SR22 auto insurance quotes and may mention carriers like Progressive or Dairyland, plus details such as their name, ZIP code, birth date, and driver's license number.";
 
-/** Keep the transcription prompt well under the model's short-hint budget. */
-const TRANSCRIPTION_PROMPT_MAX = 500;
+/** Keep the transcription prompt short to further discourage prompt echo. */
+const TRANSCRIPTION_PROMPT_MAX = 300;
 
 /**
  * Build the GA `session.audio.input.transcription` object: the configured model,
- * English, and a vocabulary prompt = the static SR22 hint plus this bot's active
- * lead_field labels (reusing the same leadFields loaded for buildCaptureLeadTool).
- * Pure + exported so it's unit-testable. Empty/label-less fields fall back to the
- * static sentence alone; the final prompt is truncated to <= ~500 chars.
+ * English, and the static natural-language vocabulary sentence. The per-tenant
+ * lead_field labels are NO LONGER appended — that keyword-list suffix is what made
+ * the transcriber echo the prompt into transcripts. `leadFields` is retained in the
+ * signature for call-site compatibility but intentionally unused. Pure + exported so
+ * it's unit-testable; the prompt is truncated to <= TRANSCRIPTION_PROMPT_MAX chars.
  */
 export function buildTranscriptionConfig(
   model: string,
-  leadFields: LeadFieldRow[]
+  _leadFields: LeadFieldRow[]
 ): { model: string; language: string; prompt: string } {
   let prompt = STATIC_TRANSCRIPTION_VOCAB;
-  const labels = (leadFields ?? [])
-    .map((f) => (typeof f.label === "string" ? f.label.trim() : ""))
-    .filter((l) => l !== "");
-  if (labels.length > 0) {
-    prompt = `${STATIC_TRANSCRIPTION_VOCAB}. Lead fields: ${labels.join(", ")}`;
-    if (prompt.length > TRANSCRIPTION_PROMPT_MAX) {
-      prompt = prompt.slice(0, TRANSCRIPTION_PROMPT_MAX).trimEnd();
-    }
+  if (prompt.length > TRANSCRIPTION_PROMPT_MAX) {
+    prompt = prompt.slice(0, TRANSCRIPTION_PROMPT_MAX).trimEnd();
   }
   return { model, language: "en", prompt };
 }
@@ -234,6 +329,8 @@ export class RealtimeEngine {
   private terminal = false;
   /** capture_lead_info tool built from lead_fields (or the fallback). */
   private captureLeadTool: Record<string, unknown> = { ...FALLBACK_CAPTURE_LEAD_TOOL };
+  /** Active lead_fields for this call — used to validate captured values server-side. */
+  private leadFields: LeadFieldRow[] = [];
   /** server-VAD turn_detection built from the effective voice config. */
   private turnDetection: Record<string, unknown> = { type: "server_vad" };
   /** input transcription config (model + language + vocabulary prompt). */
@@ -274,6 +371,7 @@ export class RealtimeEngine {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      this.leadFields = leadFields;
       this.captureLeadTool = buildCaptureLeadTool(leadFields);
       // Reuse the same leadFields to bias the input transcriber toward this bot's
       // field labels on top of the static SR22 vocabulary.
@@ -472,10 +570,13 @@ export class RealtimeEngine {
       logger.warn("Unparseable tool arguments", { callId: this.state.callId, name });
     }
 
+    // Default acknowledgement; capture_lead_info overrides it with a validation-aware
+    // output so the model knows which values were saved vs. rejected (and re-asks).
+    let output: Record<string, unknown> = { ok: true };
     try {
       switch (name) {
         case "capture_lead_info":
-          await this.onCaptureLead(args);
+          output = await this.onCaptureLead(args);
           break;
         case "record_close_attempt":
           if (typeof args.attempt_number === "number") {
@@ -507,51 +608,64 @@ export class RealtimeEngine {
         item: {
           type: "function_call_output",
           call_id: callId,
-          output: JSON.stringify({ ok: true }),
+          output: JSON.stringify(output),
         },
       });
     }
   }
 
-  private async onCaptureLead(args: Record<string, unknown>): Promise<void> {
-    // Every captured answer (known OR custom key) is merged into calls.captured_data,
-    // scoped to bot_id + call_id. This happens regardless of whether we know the
-    // caller number so dynamic/custom fields are always persisted.
-    this.state.capturedData = { ...this.state.capturedData, ...args };
-    await mergeCapturedData(this.state.callId, args);
+  private async onCaptureLead(
+    args: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    // Validate every submitted value against its lead_fields definition BEFORE
+    // persisting. Only the keys that pass are merged; invalid keys are dropped and
+    // reported back to the model so it re-asks rather than storing junk.
+    const { valid, invalid } = validateCapturedValues(this.leadFields, args);
+    const savedKeys = Object.keys(valid);
 
-    // ALSO keep the leads-table upsert in sync for the field_keys that map to
-    // existing leads columns. Unknown/custom keys go to captured_data only (above).
-    if (!this.state.callerNumber) return;
-    const hasLeadColumnUpdate = LEADS_TABLE_KEYS.some((k) => args[k] !== undefined);
-    if (!hasLeadColumnUpdate) return;
+    if (savedKeys.length > 0) {
+      // Every valid captured answer (known OR custom key) is merged into
+      // calls.captured_data, scoped to bot_id + call_id, regardless of whether we
+      // know the caller number so dynamic/custom fields are always persisted.
+      this.state.capturedData = { ...this.state.capturedData, ...valid };
+      await mergeCapturedData(this.state.callId, valid);
 
-    const carrier =
-      typeof args.carrier === "string" &&
-      ["progressive", "dairyland", "other"].includes(args.carrier)
-        ? (args.carrier as Carrier)
-        : undefined;
+      // ALSO keep the leads-table upsert in sync for the field_keys that map to
+      // existing leads columns. Unknown/custom keys go to captured_data only (above).
+      if (this.state.callerNumber && LEADS_TABLE_KEYS.some((k) => valid[k] !== undefined)) {
+        const carrier =
+          typeof valid.carrier === "string" &&
+          ["progressive", "dairyland", "other"].includes(valid.carrier)
+            ? (valid.carrier as Carrier)
+            : undefined;
 
-    const updates = {
-      first_name: str(args.first_name),
-      zip_code: str(args.zip_code),
-      date_of_birth: str(args.date_of_birth),
-      license_number: str(args.license_number),
-      quote_amount_pif: num(args.quote_amount_pif),
-      quote_amount_monthly: num(args.quote_amount_monthly),
-      carrier,
-    };
+        const updates = {
+          first_name: str(valid.first_name),
+          zip_code: str(valid.zip_code),
+          date_of_birth: str(valid.date_of_birth),
+          license_number: str(valid.license_number),
+          quote_amount_pif: num(valid.quote_amount_pif),
+          quote_amount_monthly: num(valid.quote_amount_monthly),
+          carrier,
+        };
 
-    await upsertLead({
-      phone_number: this.state.callerNumber,
-      ...updates,
-      status: "quoted",
-      last_contacted_at: new Date().toISOString(),
-    });
-    this.state.lead = {
-      ...(this.state.lead ?? { phone_number: this.state.callerNumber }),
-      ...updates,
-    };
+        await upsertLead({
+          phone_number: this.state.callerNumber,
+          ...updates,
+          status: "quoted",
+          last_contacted_at: new Date().toISOString(),
+        });
+        this.state.lead = {
+          ...(this.state.lead ?? { phone_number: this.state.callerNumber }),
+          ...updates,
+        };
+      }
+    }
+
+    if (Object.keys(invalid).length > 0) {
+      return { status: "rejected", invalid, saved: savedKeys };
+    }
+    return { ok: true };
   }
 
   private async escalate(reason: string): Promise<void> {

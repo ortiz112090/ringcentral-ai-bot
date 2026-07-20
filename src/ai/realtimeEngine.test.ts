@@ -81,9 +81,11 @@ import {
   buildCaptureLeadTool,
   buildTurnDetection,
   buildTranscriptionConfig,
+  validateCapturedValues,
   STATIC_TRANSCRIPTION_VOCAB,
   type RealtimeCallbacks,
 } from "./realtimeEngine";
+import type { LeadFieldRow } from "../db/queries";
 import { config } from "../config";
 import type { CallState } from "../state/conversationStore";
 
@@ -253,7 +255,7 @@ describe("buildTranscriptionConfig", () => {
     sort_order: 1,
   });
 
-  it("uses the default model + static vocab only when there are no fields", () => {
+  it("uses the default model + the static natural-language vocab when there are no fields", () => {
     const cfg = buildTranscriptionConfig("gpt-4o-transcribe", []);
     expect(cfg).toEqual({
       model: "gpt-4o-transcribe",
@@ -262,31 +264,31 @@ describe("buildTranscriptionConfig", () => {
     });
   });
 
-  it("appends active lead-field labels to the vocabulary prompt", () => {
+  it("uses a natural-language sentence, not a keyword/term list", () => {
+    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", []);
+    // Anti-echo: a fluent sentence, not "Expect terms like:" / colon-delimited dump.
+    expect(cfg.prompt).toContain("SR22");
+    expect(cfg.prompt).not.toContain("Expect terms like");
+    expect(cfg.prompt).not.toMatch(/:/); // no "label:" list separators
+    expect(cfg.prompt.trim()).toMatch(/\.$/); // reads as a sentence
+  });
+
+  it("no longer appends the lead-field label list to the prompt", () => {
     const cfg = buildTranscriptionConfig("gpt-4o-transcribe", [
       field("Start timeline"),
       field("Vehicle year"),
     ]);
-    expect(cfg.model).toBe("gpt-4o-transcribe");
-    expect(cfg.language).toBe("en");
-    expect(cfg.prompt).toContain(STATIC_TRANSCRIPTION_VOCAB);
-    expect(cfg.prompt).toContain("Start timeline");
-    expect(cfg.prompt).toContain("Vehicle year");
-  });
-
-  it("ignores empty/whitespace-only labels", () => {
-    const cfg = buildTranscriptionConfig("gpt-4o-transcribe", [
-      field(""),
-      field("   "),
-      field(null),
-    ]);
     expect(cfg.prompt).toBe(STATIC_TRANSCRIPTION_VOCAB);
+    expect(cfg.prompt).not.toContain("Lead fields:");
+    expect(cfg.prompt).not.toContain("Start timeline");
+    expect(cfg.prompt).not.toContain("Vehicle year");
   });
 
-  it("truncates the prompt to <= ~500 chars when labels are long", () => {
+  it("keeps the prompt short (<= 300 chars)", () => {
     const many = Array.from({ length: 100 }, (_, i) => field(`Field label number ${i}`));
     const cfg = buildTranscriptionConfig("gpt-4o-transcribe", many);
-    expect(cfg.prompt.length).toBeLessThanOrEqual(500);
+    expect(cfg.prompt.length).toBeLessThanOrEqual(300);
+    expect(STATIC_TRANSCRIPTION_VOCAB.length).toBeLessThanOrEqual(300);
   });
 
   it("passes the model name through unchanged (env override lands here)", () => {
@@ -398,6 +400,174 @@ describe("dynamic capture tool wiring + captured_data merge", () => {
     expect(state.capturedData).toMatchObject(args);
     // No known lead columns present → no leads upsert.
     expect(upsertLead).not.toHaveBeenCalled();
+  });
+});
+
+describe("validateCapturedValues", () => {
+  const f = (over: Partial<LeadFieldRow>): LeadFieldRow => ({
+    field_key: "k",
+    label: null,
+    description: null,
+    field_type: "text",
+    choices: null,
+    required: false,
+    sort_order: 1,
+    ...over,
+  });
+
+  it("number: strips $/commas and parses to a finite number (valid)", () => {
+    const fields = [f({ field_key: "quote_amount_pif", field_type: "number" })];
+    const res = validateCapturedValues(fields, { quote_amount_pif: "$1,200" });
+    expect(res.invalid).toEqual({});
+    expect(res.valid.quote_amount_pif).toBe(1200);
+  });
+
+  it("number: rejects non-numeric text", () => {
+    const fields = [f({ field_key: "quote_amount_pif", field_type: "number" })];
+    const res = validateCapturedValues(fields, { quote_amount_pif: "cheap" });
+    expect(res.valid).toEqual({});
+    expect(res.invalid.quote_amount_pif).toMatch(/number/i);
+  });
+
+  it("date: accepts natural formats and stores as given", () => {
+    const fields = [f({ field_key: "date_of_birth", field_type: "date" })];
+    const res = validateCapturedValues(fields, { date_of_birth: "March 5, 1990" });
+    expect(res.invalid).toEqual({});
+    expect(res.valid.date_of_birth).toBe("March 5, 1990");
+  });
+
+  it("date: rejects unparseable junk", () => {
+    const fields = [f({ field_key: "date_of_birth", field_type: "date" })];
+    const res = validateCapturedValues(fields, { date_of_birth: "blah" });
+    expect(res.valid).toEqual({});
+    expect(res.invalid.date_of_birth).toMatch(/date/i);
+  });
+
+  it("choice: case-insensitive match, stores canonical choice", () => {
+    const fields = [
+      f({ field_key: "carrier", field_type: "choice", choices: ["progressive", "dairyland", "other"] }),
+    ];
+    const res = validateCapturedValues(fields, { carrier: "Progressive" });
+    expect(res.invalid).toEqual({});
+    expect(res.valid.carrier).toBe("progressive");
+  });
+
+  it("choice: rejects a value not in the choices array", () => {
+    const fields = [
+      f({ field_key: "carrier", field_type: "choice", choices: ["progressive", "dairyland"] }),
+    ];
+    const res = validateCapturedValues(fields, { carrier: "geico" });
+    expect(res.valid).toEqual({});
+    expect(res.invalid.carrier).toMatch(/one of/i);
+  });
+
+  it("zip by field_key: requires exactly 5 digits", () => {
+    const fields = [f({ field_key: "zip_code", field_type: "text" })];
+    expect(validateCapturedValues(fields, { zip_code: "90210" }).valid.zip_code).toBe("90210");
+    expect(validateCapturedValues(fields, { zip_code: "9021" }).invalid.zip_code).toMatch(/5-digit/);
+    expect(validateCapturedValues(fields, { zip_code: "902100" }).invalid.zip_code).toMatch(/5-digit/);
+  });
+
+  it("zip by label ('ZIP' in label) takes precedence over field_type", () => {
+    const fields = [f({ field_key: "postal", label: "Home ZIP", field_type: "number" })];
+    expect(validateCapturedValues(fields, { postal: "abcde" }).invalid.postal).toMatch(/5-digit/);
+    expect(validateCapturedValues(fields, { postal: "12345" }).valid.postal).toBe("12345");
+  });
+
+  it("text: rejects empty/whitespace and values with no letters or digits", () => {
+    const fields = [f({ field_key: "first_name", field_type: "text" })];
+    expect(validateCapturedValues(fields, { first_name: "Sam" }).valid.first_name).toBe("Sam");
+    expect(validateCapturedValues(fields, { first_name: "   " }).invalid.first_name).toBeDefined();
+    expect(validateCapturedValues(fields, { first_name: "!!!" }).invalid.first_name).toBeDefined();
+  });
+
+  it("keeps valid keys and drops only the invalid ones (mixed submission)", () => {
+    const fields = [
+      f({ field_key: "first_name", field_type: "text" }),
+      f({ field_key: "zip_code", field_type: "text" }),
+    ];
+    const res = validateCapturedValues(fields, { first_name: "Sam", zip_code: "9" });
+    expect(res.valid).toEqual({ first_name: "Sam" });
+    expect(Object.keys(res.invalid)).toEqual(["zip_code"]);
+  });
+
+  it("treats keys with no field definition as free-form text", () => {
+    const res = validateCapturedValues([], { note: "call back later", junk: "   " });
+    expect(res.valid).toEqual({ note: "call back later" });
+    expect(res.invalid.junk).toBeDefined();
+  });
+});
+
+describe("capture_lead_info server-side validation wiring", () => {
+  function fireCapture(ws: any, args: Record<string, unknown>, callId = "fc_v") {
+    ws.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.function_call_arguments.done",
+          name: "capture_lead_info",
+          arguments: JSON.stringify(args),
+          call_id: callId,
+        })
+      )
+    );
+  }
+
+  function outputFor(ws: any, callId: string): any {
+    const frame = ws
+      .sentJson()
+      .find(
+        (m: any) => m.type === "conversation.item.create" && m.item?.call_id === callId
+      );
+    return frame ? JSON.parse(frame.item.output) : undefined;
+  }
+
+  it("returns a rejection output and merges ONLY the valid keys", async () => {
+    getLeadFields.mockResolvedValueOnce([
+      { field_key: "first_name", label: "First name", description: null, field_type: "text", choices: null, required: false, sort_order: 1 },
+      { field_key: "zip_code", label: "ZIP", description: null, field_type: "text", choices: null, required: false, sort_order: 2 },
+    ]);
+    const { ws, state } = await startEngine();
+    fireCapture(ws, { first_name: "Sam", zip_code: "9" }, "fc_bad");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Only the valid key is persisted.
+    expect(mergeCapturedData).toHaveBeenCalledWith("call-1", { first_name: "Sam" });
+    expect(state.capturedData).toEqual({ first_name: "Sam" });
+    expect(state.capturedData).not.toHaveProperty("zip_code");
+
+    // The model gets a rejection payload it can re-ask on.
+    const out = outputFor(ws, "fc_bad");
+    expect(out.status).toBe("rejected");
+    expect(out.invalid.zip_code).toMatch(/5-digit/);
+    expect(out.saved).toEqual(["first_name"]);
+  });
+
+  it("returns the success output when all values are valid", async () => {
+    getLeadFields.mockResolvedValueOnce([
+      { field_key: "first_name", label: "First name", description: null, field_type: "text", choices: null, required: false, sort_order: 1 },
+    ]);
+    const { ws } = await startEngine();
+    fireCapture(ws, { first_name: "Sam" }, "fc_ok");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mergeCapturedData).toHaveBeenCalledWith("call-1", { first_name: "Sam" });
+    expect(outputFor(ws, "fc_ok")).toEqual({ ok: true });
+  });
+
+  it("does not persist anything when every value is invalid", async () => {
+    getLeadFields.mockResolvedValueOnce([
+      { field_key: "zip_code", label: "ZIP", description: null, field_type: "text", choices: null, required: false, sort_order: 1 },
+    ]);
+    const { ws, state } = await startEngine();
+    fireCapture(ws, { zip_code: "nope" }, "fc_none");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mergeCapturedData).not.toHaveBeenCalled();
+    expect(state.capturedData).toEqual({});
+    const out = outputFor(ws, "fc_none");
+    expect(out.status).toBe("rejected");
+    expect(out.saved).toEqual([]);
   });
 });
 
