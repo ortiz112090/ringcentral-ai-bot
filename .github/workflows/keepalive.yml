@@ -1,0 +1,15 @@
+name: Keep Render awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch: {}      # allow manual run
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 https://ringcentral-ai-bot.onrender.com/health)
+          echo "Health responded with HTTP $code"
+          test "$code" = "200"
