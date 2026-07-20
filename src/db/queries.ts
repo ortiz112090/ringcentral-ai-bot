@@ -193,6 +193,105 @@ export async function finalizeCallRecord(
   }
 }
 
+/** A dashboard-configured lead-capture field (lead_fields table), scoped to a bot. */
+export interface LeadFieldRow {
+  field_key: string;
+  label: string | null;
+  description: string | null;
+  field_type: "text" | "number" | "date" | "choice" | string;
+  choices: string[] | null;
+  required: boolean | null;
+  sort_order: number | null;
+}
+
+/**
+ * Read this bot's ACTIVE lead-capture fields ordered by sort_order, used to build
+ * the capture_lead_info tool schema dynamically. Failure-tolerant: on any error
+ * returns an empty array so the caller falls back to the hardcoded schema and the
+ * call flow is never broken.
+ */
+export async function getLeadFields(botId: string = BOT_ID): Promise<LeadFieldRow[]> {
+  const { data, error } = await supabase
+    .from("lead_fields")
+    .select("field_key, label, description, field_type, choices, required, sort_order")
+    .eq("bot_id", botId)
+    .eq("active", true)
+    .order("sort_order", { ascending: true });
+  if (error) {
+    logger.error("Failed to load lead fields", { botId, error: error.message });
+    return [];
+  }
+  return (data as LeadFieldRow[]) ?? [];
+}
+
+/**
+ * Merge the model's captured answers into calls.captured_data (a JSONB object),
+ * scoped to bot_id + call_id. Read-modify-write: existing keys are preserved and
+ * new/changed keys overwrite. Failure-tolerant: logs and continues so a dropped
+ * capture never interrupts the live call.
+ */
+export async function mergeCapturedData(
+  callId: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  if (!data || Object.keys(data).length === 0) return;
+  const { data: row, error } = await supabase
+    .from("calls")
+    .select("captured_data")
+    .eq("bot_id", BOT_ID)
+    .eq("call_id", callId)
+    .maybeSingle();
+  if (error) {
+    logger.error("Failed to read captured_data for merge", { callId, error: error.message });
+    return;
+  }
+  const current = (row?.captured_data as Record<string, unknown> | null) ?? {};
+  const merged = { ...current, ...data };
+  const { error: updateError } = await supabase
+    .from("calls")
+    .update({ captured_data: merged })
+    .eq("bot_id", BOT_ID)
+    .eq("call_id", callId);
+  if (updateError) {
+    logger.error("Failed to merge captured_data", { callId, error: updateError.message });
+  }
+}
+
+/** A resolved webhook lead-destination (from lead_destinations.config). */
+export interface WebhookDestination {
+  url: string;
+  secret?: string;
+}
+
+/**
+ * Return this bot's enabled webhook lead-destination (destination_type='webhook')
+ * with a non-empty config.url, or null when none is configured. Failure-tolerant:
+ * logs and returns null so webhook dispatch is simply skipped on error.
+ */
+export async function getWebhookDestination(
+  botId: string = BOT_ID
+): Promise<WebhookDestination | null> {
+  const { data, error } = await supabase
+    .from("lead_destinations")
+    .select("config")
+    .eq("bot_id", botId)
+    .eq("destination_type", "webhook")
+    .eq("enabled", true)
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    logger.error("Failed to load lead destination", { botId, error: error.message });
+    return null;
+  }
+  const cfg = (data?.config as { url?: unknown; secret?: unknown } | null) ?? null;
+  const url = typeof cfg?.url === "string" ? cfg.url.trim() : "";
+  if (!url) return null;
+  return {
+    url,
+    secret: typeof cfg?.secret === "string" && cfg.secret !== "" ? cfg.secret : undefined,
+  };
+}
+
 /** Look up an existing lead by phone number so the bot can personalize the opener. */
 export async function findLeadByPhone(phone: string): Promise<LeadRecord | null> {
   const { data, error } = await supabase

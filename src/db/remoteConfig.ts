@@ -79,6 +79,14 @@ export interface BotConfigRow {
   voice_provider: string | null;
   /** E.164 number to dial when escalating to a human on the Twilio path. */
   escalation_number: string | null;
+  /** Server-VAD sensitivity (0-1); higher = less sensitive to background/breath noise. */
+  vad_threshold: number | null;
+  /** Silence (ms) after speech before the model treats the caller's turn as ended. */
+  vad_silence_ms: number | null;
+  /** Audio (ms) kept before detected speech so word onsets aren't clipped. */
+  vad_prefix_padding_ms: number | null;
+  /** When false, the caller speaking does NOT interrupt/flush the bot's outgoing audio. */
+  barge_in_enabled: boolean | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */

@@ -9,6 +9,8 @@ interface Recorded {
   eq: Record<string, any>;
   is: Record<string, any>;
   selected?: string;
+  order?: { col: string; opts?: any };
+  limit?: number;
 }
 
 const results: Array<{ data: any; error: any }> = [];
@@ -48,6 +50,14 @@ function makeBuilder() {
       rec.eq[col] = val;
       return builder;
     },
+    order(col: string, opts?: any) {
+      rec.order = { col, opts };
+      return builder;
+    },
+    limit(n: number) {
+      rec.limit = n;
+      return builder;
+    },
     maybeSingle() {
       return builder;
     },
@@ -64,7 +74,12 @@ vi.mock("./supabase", () => ({
   supabase: { from: (_table: string) => makeBuilder() },
 }));
 
-import { finalizeCallRecord } from "./queries";
+import {
+  finalizeCallRecord,
+  getLeadFields,
+  mergeCapturedData,
+  getWebhookDestination,
+} from "./queries";
 
 const BOT_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -124,5 +139,82 @@ describe("finalizeCallRecord double-finalize guard", () => {
     await finalizeCallRecord("c1", { outcome: "closed_pif" });
 
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("getLeadFields", () => {
+  it("queries active fields for the bot ordered by sort_order", async () => {
+    const rows = [{ field_key: "first_name", field_type: "text" }];
+    results.push({ data: rows, error: null });
+
+    const out = await getLeadFields(BOT_ID);
+
+    expect(out).toEqual(rows);
+    const [c] = calls;
+    expect(c.eq.bot_id).toBe(BOT_ID);
+    expect(c.eq.active).toBe(true);
+    expect(c.order).toEqual({ col: "sort_order", opts: { ascending: true } });
+  });
+
+  it("returns [] on query error (fallback path)", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    expect(await getLeadFields(BOT_ID)).toEqual([]);
+  });
+});
+
+describe("mergeCapturedData", () => {
+  it("read-modify-writes: preserves existing keys and overwrites with new ones", async () => {
+    results.push({ data: { captured_data: { a: 1, b: 2 } }, error: null }); // read
+    results.push({ data: null, error: null }); // update
+
+    await mergeCapturedData("c1", { b: 3, c: 4 });
+
+    expect(calls).toHaveLength(2);
+    const [read, update] = calls;
+    expect(read.op).toBeUndefined(); // select-only chain
+    expect(read.eq.call_id).toBe("c1");
+    expect(update.op).toBe("update");
+    expect(update.payload.captured_data).toEqual({ a: 1, b: 3, c: 4 });
+    expect(update.eq.bot_id).toBe(BOT_ID);
+    expect(update.eq.call_id).toBe("c1");
+  });
+
+  it("no-ops on empty data (no DB calls)", async () => {
+    await mergeCapturedData("c1", {});
+    expect(calls).toHaveLength(0);
+  });
+
+  it("skips the write when the read errors", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    await mergeCapturedData("c1", { a: 1 });
+    expect(calls).toHaveLength(1); // only the read ran
+  });
+});
+
+describe("getWebhookDestination", () => {
+  it("returns url + secret from an enabled webhook row", async () => {
+    results.push({
+      data: { config: { url: "https://hook.example.com", secret: "s3cr3t" } },
+      error: null,
+    });
+
+    const dest = await getWebhookDestination(BOT_ID);
+
+    expect(dest).toEqual({ url: "https://hook.example.com", secret: "s3cr3t" });
+    const [c] = calls;
+    expect(c.eq.bot_id).toBe(BOT_ID);
+    expect(c.eq.destination_type).toBe("webhook");
+    expect(c.eq.enabled).toBe(true);
+    expect(c.limit).toBe(1);
+  });
+
+  it("returns null when config.url is missing/empty", async () => {
+    results.push({ data: { config: { secret: "x" } }, error: null });
+    expect(await getWebhookDestination(BOT_ID)).toBeNull();
+  });
+
+  it("returns null on query error", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    expect(await getWebhookDestination(BOT_ID)).toBeNull();
   });
 });
