@@ -54,6 +54,9 @@ describe("buildRealtimeInstructions adherence + VOICE & DELIVERY (both paths)", 
     expect(prompt).toMatch(/steer back to the current stage/);
     expect(prompt).toMatch(/# VOICE & DELIVERY/);
     expect(prompt).toMatch(/contractions/);
+    // Verbatim script-delivery rule present on the fallback path.
+    expect(prompt).toMatch(/word-for-word/i);
+    expect(prompt).toMatch(/do not rephrase/i);
     // Hardcoded SR22 script still fully intact.
     expect(prompt).toMatch(/trying to get an SR22 filed/);
     expect(prompt).toMatch(/# SCRIPT FLOW/);
@@ -127,6 +130,11 @@ describe("buildRealtimeInstructions DB-driven script", () => {
   it("includes the adherence rule and VOICE & DELIVERY section", () => {
     expect(prompt).toMatch(/Do NOT invent your own questions/);
     expect(prompt).toMatch(/# VOICE & DELIVERY/);
+  });
+
+  it("includes the verbatim script-delivery rule on the DB stages path", () => {
+    expect(prompt).toMatch(/word-for-word/i);
+    expect(prompt).toMatch(/do not rephrase/i);
   });
 
   it("omits the hardcoded opener text when DB stages are present", () => {
