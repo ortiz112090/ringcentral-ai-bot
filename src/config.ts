@@ -132,6 +132,12 @@ export interface EffectiveConfig {
   };
   openai: {
     apiKey: string | undefined;
+    /**
+     * Input-transcription model for the realtime session (caller speech → text).
+     * Env `OPENAI_TRANSCRIBE_MODEL` first, else a safe default. Defaults to
+     * "gpt-4o-transcribe", far more accurate than whisper-1 on 8kHz phone audio.
+     */
+    transcribeModel: string;
   };
   twilio: {
     accountSid: string | undefined;
@@ -234,12 +240,10 @@ export function twilioStatusCallbackUrl(): string {
  * Supabase only when the corresponding env var is unset.
  */
 export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
-  // Lazy require to avoid a module-load import cycle (see import note above).
-  const {
-    getRemoteConfig,
-    getCredential,
-    BOT_ID,
-  } = require("./db/remoteConfig") as typeof import("./db/remoteConfig");
+  // Lazy import to avoid a module-load import cycle (see import note above). Under
+  // CommonJS this downlevels to a deferred require, so the cycle-avoidance is
+  // unchanged; using import() keeps it resolvable/mockable in the test runner.
+  const { getRemoteConfig, getCredential, BOT_ID } = await import("./db/remoteConfig");
 
   const botConfig: BotConfigRow | null = getRemoteConfig().botConfig;
 
@@ -287,6 +291,13 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
     },
     openai: {
       apiKey: credentialFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
+      // Env-first, then a bot_config column if one is ever added (none today — no
+      // migration), then the hardcoded default. Not a credential, so plain envFirst.
+      transcribeModel:
+        envFirst(
+          "OPENAI_TRANSCRIBE_MODEL",
+          (botConfig as { transcribe_model?: string | null } | null)?.transcribe_model
+        ) ?? "gpt-4o-transcribe",
     },
     twilio: {
       // Credentials: DB (api_credentials provider "twilio") first, env only for
