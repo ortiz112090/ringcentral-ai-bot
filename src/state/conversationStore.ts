@@ -17,6 +17,8 @@ export interface CallState {
   stage: string;
   closeAttempts: number;
   startedAt: string;
+  /** Accumulated lead answers captured this call (mirrors calls.captured_data). */
+  capturedData: Record<string, unknown>;
 }
 
 const store = new Map<string, CallState>();
@@ -35,6 +37,7 @@ export function createCallState(
     stage: "opener",
     closeAttempts: 0,
     startedAt: new Date().toISOString(),
+    capturedData: {},
   };
   store.set(callId, state);
   return state;

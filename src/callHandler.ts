@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { logger } from "./logger";
 import { getBotDecision } from "./ai/conversation";
 import { synthesizeSpeech } from "./speech/openai";
@@ -7,7 +8,9 @@ import {
   finalizeCallRecord,
   findLeadByPhone,
   upsertLead,
+  getWebhookDestination,
 } from "./db/queries";
+import { BOT_ID } from "./db/remoteConfig";
 import {
   CallState,
   createCallState,
@@ -163,13 +166,85 @@ export async function wrapUpCall(state: CallState, outcome: CallOutcome): Promis
   // getCallState and returns early — the primary dedupe against a double-finalize.
   // We keep our own `state` reference for the write below.
   endCallState(state.callId);
+  const endedAt = new Date().toISOString();
   await finalizeCallRecord(state.callId, {
     outcome,
     scriptStageReached: state.stage,
     transcript: state.transcript,
-    endedAt: new Date().toISOString(),
+    endedAt,
   });
   logger.info("Call finalized", { callId: state.callId, outcome, stage: state.stage });
+
+  // Fire-and-forget: deliver captured lead data to the configured webhook. Never
+  // awaited — a slow/failing endpoint must not delay teardown or affect DB writes.
+  void dispatchLeadWebhook({
+    bot_id: BOT_ID,
+    call_id: state.callId,
+    caller_number: state.callerNumber,
+    outcome,
+    started_at: state.startedAt,
+    ended_at: endedAt,
+    captured_data: state.capturedData,
+  });
+}
+
+/** JSON body POSTed to a configured webhook lead-destination on call finalize. */
+export interface LeadWebhookPayload {
+  bot_id: string;
+  call_id: string;
+  caller_number: string | null;
+  outcome: CallOutcome;
+  started_at: string;
+  ended_at: string;
+  captured_data: Record<string, unknown>;
+}
+
+const WEBHOOK_TIMEOUT_MS = 5000;
+
+/**
+ * Deliver captured lead data to this bot's enabled webhook lead-destination, if
+ * one exists. Single attempt, 5s timeout, no retries. When a config.secret is set,
+ * the raw JSON body is signed with HMAC-SHA256 and the hex digest sent as
+ * X-Signature. NEVER throws — any failure is logged at warn and swallowed so the
+ * call flow and DB writes are unaffected.
+ */
+export async function dispatchLeadWebhook(payload: LeadWebhookPayload): Promise<void> {
+  try {
+    const destination = await getWebhookDestination(payload.bot_id);
+    if (!destination) return;
+
+    const body = JSON.stringify(payload);
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (destination.secret) {
+      headers["X-Signature"] = createHmac("sha256", destination.secret)
+        .update(body)
+        .digest("hex");
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+    try {
+      const res = await fetch(destination.url, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        logger.warn("Lead webhook returned non-2xx", {
+          callId: payload.call_id,
+          status: res.status,
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    logger.warn("Lead webhook dispatch failed", {
+      callId: payload.call_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---- internals ----

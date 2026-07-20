@@ -149,6 +149,32 @@ export interface EffectiveConfig {
   };
   realtimeVoice: string;
   escalationExtension: string | undefined;
+  /**
+   * Server-VAD turn-detection tuning for the realtime session, sourced from
+   * bot_config (with the seeded defaults when the columns are null/missing).
+   * Higher `vadThreshold` + longer `vadSilenceMs` make the bot less likely to
+   * treat phone-line breath/noise as the caller taking a turn.
+   */
+  voice: {
+    vadThreshold: number;
+    vadSilenceMs: number;
+    vadPrefixPaddingMs: number;
+    /** When false, caller speech does not interrupt/flush the bot's outgoing audio. */
+    bargeInEnabled: boolean;
+  };
+}
+
+/** bot_config defaults for the VAD columns (mirror the migration defaults). */
+const VAD_DEFAULTS = {
+  threshold: 0.7,
+  silenceMs: 800,
+  prefixPaddingMs: 300,
+  bargeInEnabled: true,
+} as const;
+
+/** Numeric bot_config value, or the default when null/undefined/non-finite. */
+function numberOr(value: number | null | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 /** Trimmed PUBLIC_BASE_URL with any trailing slash removed, or "" when unset. */
@@ -280,5 +306,12 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",
     escalationExtension: envFirst("ESCALATION_QUEUE_EXTENSION", botConfig?.escalation_extension),
+    voice: {
+      vadThreshold: numberOr(botConfig?.vad_threshold, VAD_DEFAULTS.threshold),
+      vadSilenceMs: numberOr(botConfig?.vad_silence_ms, VAD_DEFAULTS.silenceMs),
+      vadPrefixPaddingMs: numberOr(botConfig?.vad_prefix_padding_ms, VAD_DEFAULTS.prefixPaddingMs),
+      // Only an explicit false disables barge-in; null/missing keeps the default (true).
+      bargeInEnabled: botConfig?.barge_in_enabled !== false,
+    },
   };
 }

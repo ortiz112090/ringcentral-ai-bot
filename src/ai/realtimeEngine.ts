@@ -1,11 +1,17 @@
 import WebSocket from "ws";
-import { config, resolveEffectiveConfig } from "../config";
+import { config, resolveEffectiveConfig, type EffectiveConfig } from "../config";
 import { BOT_ID } from "../db/remoteConfig";
 import { logger } from "../logger";
 import { buildRealtimeInstructions } from "./systemPrompt";
 import { retrieveRelevantLessons } from "./retrieval";
 import { CallState, recordBotTurn, recordCallerTurn } from "../state/conversationStore";
-import { upsertLead, setRealtimeSessionId } from "../db/queries";
+import {
+  upsertLead,
+  setRealtimeSessionId,
+  getLeadFields,
+  mergeCapturedData,
+  type LeadFieldRow,
+} from "../db/queries";
 import { CallOutcome, Carrier } from "../db/types";
 
 /**
@@ -40,26 +46,46 @@ export interface RealtimeCallbacks {
   onOutcome: (outcome: CallOutcome) => void | Promise<void>;
 }
 
-/** Realtime session tool (function) definitions used purely for state tracking. */
-const TOOLS = [
-  {
-    type: "function",
-    name: "capture_lead_info",
-    description:
-      "Record any lead detail you learned this turn (name, ZIP, DOB, license number, quoted amounts, carrier). Call whenever you learn one.",
-    parameters: {
-      type: "object",
-      properties: {
-        first_name: { type: "string" },
-        zip_code: { type: "string" },
-        date_of_birth: { type: "string", description: "YYYY-MM-DD if known" },
-        license_number: { type: "string" },
-        quote_amount_pif: { type: "number" },
-        quote_amount_monthly: { type: "number" },
-        carrier: { type: "string", enum: ["progressive", "dairyland", "other"] },
-      },
+/** Lead columns that also live on the `leads` table (kept in sync via upsertLead). */
+const LEADS_TABLE_KEYS = [
+  "first_name",
+  "zip_code",
+  "date_of_birth",
+  "license_number",
+  "quote_amount_pif",
+  "quote_amount_monthly",
+  "carrier",
+] as const;
+
+/**
+ * Fallback capture_lead_info tool used when the dynamic lead_fields lookup fails or
+ * returns no rows — identical to the previous hardcoded schema so the call flow is
+ * never broken.
+ */
+const FALLBACK_CAPTURE_LEAD_TOOL = {
+  type: "function",
+  name: "capture_lead_info",
+  description:
+    "Record any lead detail you learned this turn (name, ZIP, DOB, license number, quoted amounts, carrier). Call whenever you learn one.",
+  parameters: {
+    type: "object",
+    properties: {
+      first_name: { type: "string" },
+      zip_code: { type: "string" },
+      date_of_birth: { type: "string", description: "YYYY-MM-DD if known" },
+      license_number: { type: "string" },
+      quote_amount_pif: { type: "number" },
+      quote_amount_monthly: { type: "number" },
+      carrier: { type: "string", enum: ["progressive", "dairyland", "other"] },
     },
   },
+} as const;
+
+/**
+ * Realtime session tools OTHER than capture_lead_info. These stay hardcoded (the
+ * capture tool is built dynamically from lead_fields; see buildCaptureLeadTool).
+ */
+const STATIC_TOOLS = [
   {
     type: "function",
     name: "record_close_attempt",
@@ -101,11 +127,82 @@ const TOOLS = [
   },
 ] as const;
 
+/**
+ * Build the capture_lead_info tool's parameter schema from dashboard-configured
+ * lead_fields. Field types map: text→string, number→number, date→string
+ * (YYYY-MM-DD), choice→string enum. Each field's description is appended. Fields
+ * are intentionally NOT marked JSON-schema-required — the model captures
+ * opportunistically; `required` is only a dashboard/UI hint. Returns the fallback
+ * hardcoded tool when no fields are provided.
+ */
+export function buildCaptureLeadTool(fields: LeadFieldRow[]): Record<string, unknown> {
+  if (!fields || fields.length === 0) return { ...FALLBACK_CAPTURE_LEAD_TOOL };
+
+  const properties: Record<string, Record<string, unknown>> = {};
+  for (const field of fields) {
+    if (!field.field_key) continue;
+    const prop: Record<string, unknown> = {};
+    switch (field.field_type) {
+      case "number":
+        prop.type = "number";
+        break;
+      case "date":
+        prop.type = "string";
+        prop.description = "YYYY-MM-DD";
+        break;
+      case "choice":
+        prop.type = "string";
+        if (Array.isArray(field.choices) && field.choices.length > 0) {
+          prop.enum = field.choices;
+        }
+        break;
+      case "text":
+      default:
+        prop.type = "string";
+        break;
+    }
+    if (field.description && field.description.trim() !== "") {
+      prop.description = prop.description
+        ? `${prop.description} — ${field.description.trim()}`
+        : field.description.trim();
+    }
+    properties[field.field_key] = prop;
+  }
+
+  return {
+    type: "function",
+    name: "capture_lead_info",
+    description:
+      "Record any lead detail you learned this turn. Call whenever you learn one.",
+    parameters: { type: "object", properties },
+  };
+}
+
+/**
+ * Build the GA server-VAD turn_detection object from the effective voice config.
+ * A higher threshold and longer silence window make the bot far less likely to
+ * treat phone-line breath/background noise as the caller taking a turn.
+ */
+export function buildTurnDetection(voice: EffectiveConfig["voice"]): Record<string, unknown> {
+  return {
+    type: "server_vad",
+    threshold: voice.vadThreshold,
+    silence_duration_ms: voice.vadSilenceMs,
+    prefix_padding_ms: voice.vadPrefixPaddingMs,
+  };
+}
+
 export class RealtimeEngine {
   private ws: WebSocket | null = null;
   private closed = false;
   private escalated = false;
   private terminal = false;
+  /** capture_lead_info tool built from lead_fields (or the fallback). */
+  private captureLeadTool: Record<string, unknown> = { ...FALLBACK_CAPTURE_LEAD_TOOL };
+  /** server-VAD turn_detection built from the effective voice config. */
+  private turnDetection: Record<string, unknown> = { type: "server_vad" };
+  /** When false, caller speech does not flush/interrupt the bot's outgoing audio. */
+  private bargeInEnabled = true;
 
   constructor(
     private readonly state: CallState,
@@ -120,7 +217,26 @@ export class RealtimeEngine {
     try {
       // Resolve the OpenAI key per-tenant (env + this bot's Supabase credentials),
       // not the raw env baseline which is empty for non-primary tenants.
-      const apiKey = (await resolveEffectiveConfig()).openai.apiKey;
+      const effective = await resolveEffectiveConfig();
+      this.turnDetection = buildTurnDetection(effective.voice);
+      this.bargeInEnabled = effective.voice.bargeInEnabled;
+
+      // Build the capture_lead_info schema from this bot's active lead_fields. On any
+      // failure/empty result we fall back to the hardcoded schema so the call flow is
+      // never broken (getLeadFields already returns [] on query error; the try/catch
+      // also covers an unexpected throw).
+      let leadFields: LeadFieldRow[] = [];
+      try {
+        leadFields = await getLeadFields(BOT_ID);
+      } catch (err) {
+        logger.warn("lead_fields load failed; using fallback capture schema", {
+          callId: this.state.callId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.captureLeadTool = buildCaptureLeadTool(leadFields);
+
+      const apiKey = effective.openai.apiKey;
       if (!apiKey) {
         throw new Error(
           `OpenAI API key missing for tenant BOT_ID=${BOT_ID}; cannot open realtime session`
@@ -215,15 +331,17 @@ export class RealtimeEngine {
             format: audioFormat,
             // Let the model transcribe caller speech so we can log a transcript.
             transcription: { model: "whisper-1" },
-            // Server-side VAD handles turn-taking (barge-in + end-of-speech detection).
-            turn_detection: { type: "server_vad" },
+            // Server-side VAD handles turn-taking (barge-in + end-of-speech detection),
+            // tuned per-tenant from bot_config so phone-line breath/noise doesn't cut
+            // the bot off. See buildTurnDetection.
+            turn_detection: this.turnDetection,
           },
           output: {
             format: audioFormat,
             voice: config.openai.realtimeVoice,
           },
         },
-        tools: TOOLS,
+        tools: [this.captureLeadTool, ...STATIC_TOOLS],
         tool_choice: "auto",
       },
     });
@@ -251,9 +369,11 @@ export class RealtimeEngine {
         break;
 
       // Caller began speaking (server VAD) — signal barge-in so the transport can
-      // flush any already-sent bot audio it is still playing.
+      // flush any already-sent bot audio it is still playing. When barge-in is
+      // disabled we deliberately do NOT flush/interrupt the bot's outgoing audio;
+      // the model still manages turns naturally via server VAD.
       case "input_audio_buffer.speech_started":
-        this.callbacks.onBargeIn?.();
+        if (this.bargeInEnabled) this.callbacks.onBargeIn?.();
         break;
 
       // Model's spoken line transcript (assistant side) — log when complete.
@@ -344,7 +464,18 @@ export class RealtimeEngine {
   }
 
   private async onCaptureLead(args: Record<string, unknown>): Promise<void> {
+    // Every captured answer (known OR custom key) is merged into calls.captured_data,
+    // scoped to bot_id + call_id. This happens regardless of whether we know the
+    // caller number so dynamic/custom fields are always persisted.
+    this.state.capturedData = { ...this.state.capturedData, ...args };
+    await mergeCapturedData(this.state.callId, args);
+
+    // ALSO keep the leads-table upsert in sync for the field_keys that map to
+    // existing leads columns. Unknown/custom keys go to captured_data only (above).
     if (!this.state.callerNumber) return;
+    const hasLeadColumnUpdate = LEADS_TABLE_KEYS.some((k) => args[k] !== undefined);
+    if (!hasLeadColumnUpdate) return;
+
     const carrier =
       typeof args.carrier === "string" &&
       ["progressive", "dairyland", "other"].includes(args.carrier)
