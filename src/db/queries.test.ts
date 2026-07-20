@@ -79,6 +79,8 @@ import {
   fetchBotActiveStatus,
   finalizeCallRecord,
   getLeadFields,
+  getScriptStages,
+  getScriptConstraints,
   mergeCapturedData,
   getWebhookDestination,
 } from "./queries";
@@ -199,6 +201,45 @@ describe("getLeadFields", () => {
   it("returns [] on query error (fallback path)", async () => {
     results.push({ data: null, error: { message: "boom" } });
     expect(await getLeadFields(BOT_ID)).toEqual([]);
+  });
+});
+
+describe("getScriptStages", () => {
+  it("queries active stages for the bot ordered by stage_order", async () => {
+    const rows = [{ stage_key: "opener", stage_type: "opener", stage_order: 1 }];
+    results.push({ data: rows, error: null });
+
+    const out = await getScriptStages(BOT_ID);
+
+    expect(out).toEqual(rows);
+    const [c] = calls;
+    expect(c.eq.bot_id).toBe(BOT_ID);
+    expect(c.eq.active).toBe(true);
+    expect(c.order).toEqual({ col: "stage_order", opts: { ascending: true } });
+  });
+
+  it("returns [] on query error (fallback to hardcoded script)", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    expect(await getScriptStages(BOT_ID)).toEqual([]);
+  });
+});
+
+describe("getScriptConstraints", () => {
+  it("queries active constraints scoped to the bot", async () => {
+    const rows = [{ rule_text: "No refunds", severity: "critical" }];
+    results.push({ data: rows, error: null });
+
+    const out = await getScriptConstraints(BOT_ID);
+
+    expect(out).toEqual(rows);
+    const [c] = calls;
+    expect(c.eq.bot_id).toBe(BOT_ID);
+    expect(c.eq.active).toBe(true);
+  });
+
+  it("returns [] on query error", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    expect(await getScriptConstraints(BOT_ID)).toEqual([]);
   });
 });
 

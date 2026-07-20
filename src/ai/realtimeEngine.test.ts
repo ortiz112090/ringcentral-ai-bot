@@ -46,12 +46,16 @@ const setRealtimeSessionId = vi.fn(async () => {});
 const upsertLead = vi.fn(async () => {});
 const insertCallTranscriptTurn = vi.fn(async () => {});
 const getLeadFields = vi.fn(async () => [] as any[]);
+const getScriptStages = vi.fn(async () => [] as any[]);
+const getScriptConstraints = vi.fn(async () => [] as any[]);
 const mergeCapturedData = vi.fn(async () => {});
 vi.mock("../db/queries", () => ({
   setRealtimeSessionId: (...a: any[]) => setRealtimeSessionId(...a),
   upsertLead: (...a: any[]) => upsertLead(...a),
   insertCallTranscriptTurn: (...a: any[]) => insertCallTranscriptTurn(...a),
   getLeadFields: (...a: any[]) => getLeadFields(...a),
+  getScriptStages: (...a: any[]) => getScriptStages(...a),
+  getScriptConstraints: (...a: any[]) => getScriptConstraints(...a),
   mergeCapturedData: (...a: any[]) => mergeCapturedData(...a),
 }));
 
@@ -66,6 +70,7 @@ const effectiveVoice = {
 };
 const resolveEffectiveConfig = vi.fn(async () => ({
   openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
+  realtimeVoice: "alloy",
   voice: { ...effectiveVoice },
 }));
 vi.mock("../config", async () => {
@@ -82,10 +87,13 @@ import {
   buildTurnDetection,
   buildTranscriptionConfig,
   validateCapturedValues,
+  resolveRealtimeVoice,
+  SUPPORTED_REALTIME_VOICES,
   STATIC_TRANSCRIPTION_VOCAB,
   type RealtimeCallbacks,
 } from "./realtimeEngine";
 import type { LeadFieldRow } from "../db/queries";
+import { buildRealtimeInstructions } from "./systemPrompt";
 import { config } from "../config";
 import type { CallState } from "../state/conversationStore";
 
@@ -143,9 +151,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Restore default mock behavior cleared by clearAllMocks.
   getLeadFields.mockResolvedValue([]);
+  getScriptStages.mockResolvedValue([]);
+  getScriptConstraints.mockResolvedValue([]);
   mergeCapturedData.mockResolvedValue(undefined);
   resolveEffectiveConfig.mockResolvedValue({
     openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
+    realtimeVoice: "alloy",
     voice: { ...effectiveVoice },
   } as any);
 });
@@ -575,10 +586,71 @@ describe("barge-in gating from config", () => {
   it("suppresses onBargeIn when bargeInEnabled is false", async () => {
     resolveEffectiveConfig.mockResolvedValueOnce({
       openai: { apiKey: "test-key" },
+      realtimeVoice: "alloy",
       voice: { ...effectiveVoice, bargeInEnabled: false },
     } as any);
     const { ws, callbacks } = await startEngine();
     ws.emit("message", Buffer.from(JSON.stringify({ type: "input_audio_buffer.speech_started" })));
     expect(callbacks.bargeIns).toBe(0);
+  });
+});
+
+describe("resolveRealtimeVoice GA validation", () => {
+  it("accepts every supported GA voice (case-insensitive)", () => {
+    for (const v of SUPPORTED_REALTIME_VOICES) {
+      expect(resolveRealtimeVoice(v)).toBe(v);
+      expect(resolveRealtimeVoice(v.toUpperCase())).toBe(v);
+    }
+  });
+
+  it("falls back to cedar for an unsupported voice", () => {
+    expect(resolveRealtimeVoice("nova")).toBe("cedar");
+  });
+
+  it("falls back to cedar for empty/undefined", () => {
+    expect(resolveRealtimeVoice("")).toBe("cedar");
+    expect(resolveRealtimeVoice("   ")).toBe("cedar");
+    expect(resolveRealtimeVoice(undefined)).toBe("cedar");
+    expect(resolveRealtimeVoice(null)).toBe("cedar");
+  });
+});
+
+describe("session.update uses the per-call effective voice", () => {
+  it("sends the resolved bot_config voice (e.g. 'sage'), not the static env config", async () => {
+    resolveEffectiveConfig.mockResolvedValueOnce({
+      openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
+      realtimeVoice: "sage",
+      voice: { ...effectiveVoice },
+    } as any);
+    const { ws } = await startEngine();
+    const update = ws.sentJson().find((m: any) => m.type === "session.update");
+    expect(update.session.audio.output.voice).toBe("sage");
+  });
+
+  it("falls back to cedar when the per-call voice is unsupported (e.g. 'nova')", async () => {
+    resolveEffectiveConfig.mockResolvedValueOnce({
+      openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
+      realtimeVoice: "nova",
+      voice: { ...effectiveVoice },
+    } as any);
+    const { ws } = await startEngine();
+    const update = ws.sentJson().find((m: any) => m.type === "session.update");
+    expect(update.session.audio.output.voice).toBe("cedar");
+  });
+});
+
+describe("session setup loads and passes the DB script", () => {
+  it("passes active stages + constraints into buildRealtimeInstructions", async () => {
+    const stages = [
+      { stage_key: "opener", stage_order: 1, stage_type: "opener", title: "Opener", script_text: "Hi" },
+    ];
+    const constraints = [{ rule_text: "No refunds", severity: "critical" }];
+    getScriptStages.mockResolvedValueOnce(stages as any);
+    getScriptConstraints.mockResolvedValueOnce(constraints as any);
+
+    const { state } = await startEngine();
+
+    const buildMock = vi.mocked(buildRealtimeInstructions);
+    expect(buildMock).toHaveBeenCalledWith(state.lead, [], stages, constraints);
   });
 });
