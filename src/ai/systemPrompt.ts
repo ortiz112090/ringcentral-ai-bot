@@ -287,8 +287,13 @@ function renderConstraintRules(
  *   - Tighter wording so session setup stays fast.
  *
  * Approved learning-system lessons are injected the same additive way as the text
- * path; they can never override the core script or hard rules. A compiled_instructions
- * override (if present) still takes precedence over everything.
+ * path; they can never override the core script or hard rules.
+ *
+ * PRECEDENCE (realtime path): active dashboard script_stages WIN. Only when there
+ * are no active stages does a non-empty compiled_instructions override apply; with
+ * neither, the hardcoded fallback script is used. This lets dashboard Call Flow edits
+ * (rendered from the DB stages) reach live calls even when a stale
+ * bot_config.compiled_instructions is still present.
  */
 export function buildRealtimeInstructions(
   lead: LeadRecord | null,
@@ -296,8 +301,14 @@ export function buildRealtimeInstructions(
   stages: ScriptStageRow[] = [],
   constraints: ScriptConstraintRow[] = []
 ): string {
-  const override = compiledInstructionsOverride(lessons);
-  if (override) return override;
+  const activeStages = (stages ?? []).filter((s) => !!s && !!s.stage_type);
+
+  // DB stages take precedence over compiled_instructions. The compiled override
+  // only applies when the dashboard has no active stages to render.
+  if (activeStages.length === 0) {
+    const override = compiledInstructionsOverride(lessons);
+    if (override) return override;
+  }
 
   const agentName = config.business.agentName;
   const brokerage = config.business.brokerageName;
@@ -312,7 +323,6 @@ export function buildRealtimeInstructions(
       }. Use the name in your opener if you have it.`
     : "This caller is not yet in the system; treat as a fresh SR22 lead.";
 
-  const activeStages = (stages ?? []).filter((s) => !!s && !!s.stage_type);
   const scriptSections =
     activeStages.length > 0
       ? buildDbScriptSections(activeStages, leadName, agentName)

@@ -154,6 +154,12 @@ export interface EffectiveConfig {
     brokerageName: string;
   };
   realtimeVoice: string;
+  /**
+   * Realtime output speaking rate, resolved env-first
+   * (OPENAI_REALTIME_SPEED → bot_config.voice_speed → 1.0) and clamped to OpenAI's
+   * supported range [0.25, 1.5]. Sent as session.audio.output.speed.
+   */
+  realtimeSpeed: number;
   escalationExtension: string | undefined;
   /**
    * Server-VAD turn-detection tuning for the realtime session, sourced from
@@ -181,6 +187,27 @@ const VAD_DEFAULTS = {
 /** Numeric bot_config value, or the default when null/undefined/non-finite. */
 function numberOr(value: number | null | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** OpenAI Realtime output-speed bounds and default. */
+const REALTIME_SPEED_MIN = 0.25;
+const REALTIME_SPEED_MAX = 1.5;
+const REALTIME_SPEED_DEFAULT = 1.0;
+
+/**
+ * Resolve a raw voice-speed value (env string or bot_config numeric) into a valid
+ * OpenAI Realtime output speed. Non-numeric/null/undefined → 1.0; numeric values are
+ * clamped to the supported range [0.25, 1.5]. Pure and side-effect free for tests.
+ */
+export function resolveRealtimeSpeed(value: unknown): number {
+  const n =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+      ? parseFloat(value)
+      : NaN;
+  if (!Number.isFinite(n)) return REALTIME_SPEED_DEFAULT;
+  return Math.min(REALTIME_SPEED_MAX, Math.max(REALTIME_SPEED_MIN, n));
 }
 
 /** Trimmed PUBLIC_BASE_URL with any trailing slash removed, or "" when unset. */
@@ -316,6 +343,11 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",
+    // Env-first: OPENAI_REALTIME_SPEED (string) wins, else bot_config.voice_speed
+    // (numeric, absent/null-tolerant), else 1.0. Clamped to [0.25, 1.5].
+    realtimeSpeed: resolveRealtimeSpeed(
+      envValue("OPENAI_REALTIME_SPEED") ?? botConfig?.voice_speed
+    ),
     escalationExtension: envFirst("ESCALATION_QUEUE_EXTENSION", botConfig?.escalation_extension),
     voice: {
       vadThreshold: numberOr(botConfig?.vad_threshold, VAD_DEFAULTS.threshold),

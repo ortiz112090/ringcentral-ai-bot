@@ -87,6 +87,12 @@ export interface BotConfigRow {
   vad_prefix_padding_ms: number | null;
   /** When false, the caller speaking does NOT interrupt/flush the bot's outgoing audio. */
   barge_in_enabled: boolean | null;
+  /**
+   * Realtime output speaking rate (OpenAI supports [0.25, 1.5]; default 1.0).
+   * Nullable/absent-tolerant: the operator applies the ALTER TABLE separately, so
+   * older schemas without this column resolve to the 1.0 default.
+   */
+  voice_speed: number | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */

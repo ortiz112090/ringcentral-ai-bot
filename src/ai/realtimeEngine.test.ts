@@ -71,6 +71,7 @@ const effectiveVoice = {
 const resolveEffectiveConfig = vi.fn(async () => ({
   openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
   realtimeVoice: "alloy",
+  realtimeSpeed: 1.0,
   voice: { ...effectiveVoice },
 }));
 vi.mock("../config", async () => {
@@ -157,6 +158,7 @@ beforeEach(() => {
   resolveEffectiveConfig.mockResolvedValue({
     openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
     realtimeVoice: "alloy",
+    realtimeSpeed: 1.0,
     voice: { ...effectiveVoice },
   } as any);
 });
@@ -631,11 +633,34 @@ describe("session.update uses the per-call effective voice", () => {
     resolveEffectiveConfig.mockResolvedValueOnce({
       openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
       realtimeVoice: "nova",
+      realtimeSpeed: 1.0,
       voice: { ...effectiveVoice },
     } as any);
     const { ws } = await startEngine();
     const update = ws.sentJson().find((m: any) => m.type === "session.update");
     expect(update.session.audio.output.voice).toBe("cedar");
+  });
+});
+
+describe("session.update sends the per-call output speed", () => {
+  it("emits session.audio.output.speed from the effective config (e.g. 1.15)", async () => {
+    resolveEffectiveConfig.mockResolvedValueOnce({
+      openai: { apiKey: "test-key", transcribeModel: "gpt-4o-transcribe" },
+      realtimeVoice: "alloy",
+      realtimeSpeed: 1.15,
+      voice: { ...effectiveVoice },
+    } as any);
+    const { ws } = await startEngine();
+    const update = ws.sentJson().find((m: any) => m.type === "session.update");
+    expect(update.session.audio.output.speed).toBe(1.15);
+    // Sent alongside voice, not replacing it.
+    expect(update.session.audio.output.voice).toBe("alloy");
+  });
+
+  it("defaults output.speed to 1.0 from the effective config", async () => {
+    const { ws } = await startEngine();
+    const update = ws.sentJson().find((m: any) => m.type === "session.update");
+    expect(update.session.audio.output.speed).toBe(1.0);
   });
 });
 
