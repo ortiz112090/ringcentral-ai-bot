@@ -388,6 +388,8 @@ export class RealtimeEngine {
   private bargeInEnabled = true;
   /** Per-call effective realtime voice (validated GA voice; defaults to fallback). */
   private realtimeVoice: string = DEFAULT_REALTIME_VOICE;
+  /** Per-call effective realtime output speed (clamped to [0.25, 1.5]; default 1.0). */
+  private realtimeSpeed = 1.0;
   /** Active dashboard script stages for this bot (empty → hardcoded fallback script). */
   private scriptStages: ScriptStageRow[] = [];
   /** Active dashboard script constraints for this bot (rendered into HARD RULES). */
@@ -413,6 +415,9 @@ export class RealtimeEngine {
       // voices; falls back to "cedar" on empty/unsupported) so session.update sends
       // THIS voice rather than the static env-only module config.
       this.realtimeVoice = resolveRealtimeVoice(effective.realtimeVoice);
+      // Per-call output speaking rate (env-first, then bot_config.voice_speed),
+      // already clamped to OpenAI's supported [0.25, 1.5] in resolveEffectiveConfig.
+      this.realtimeSpeed = effective.realtimeSpeed;
 
       // Build the capture_lead_info schema from this bot's active lead_fields. On any
       // failure/empty result we fall back to the hardcoded schema so the call flow is
@@ -555,6 +560,7 @@ export class RealtimeEngine {
           output: {
             format: audioFormat,
             voice: this.realtimeVoice,
+            speed: this.realtimeSpeed,
           },
         },
         tools: [this.captureLeadTool, ...STATIC_TOOLS],

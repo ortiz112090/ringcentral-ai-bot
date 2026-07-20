@@ -1,6 +1,22 @@
-import { describe, it, expect } from "vitest";
-import { buildRealtimeInstructions } from "./systemPrompt";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ScriptStageRow, ScriptConstraintRow } from "../db/queries";
+
+// Mutable holder so each test can set the cached bot_config the override reads.
+const { remoteHolder } = vi.hoisted(() => ({
+  remoteHolder: {
+    current: { bot: null, botConfig: null, credentials: {} } as any,
+  },
+}));
+vi.mock("../db/remoteConfig", async (importActual) => {
+  const actual = await importActual<typeof import("../db/remoteConfig")>();
+  return { ...actual, getRemoteConfig: () => remoteHolder.current };
+});
+
+import { buildRealtimeInstructions } from "./systemPrompt";
+
+beforeEach(() => {
+  remoteHolder.current = { bot: null, botConfig: null, credentials: {} };
+});
 
 describe("buildRealtimeInstructions unclear-speech honesty rules", () => {
   const prompt = buildRealtimeInstructions(null, []);
@@ -115,5 +131,51 @@ describe("buildRealtimeInstructions DB-driven script", () => {
 
   it("omits the hardcoded opener text when DB stages are present", () => {
     expect(prompt).not.toContain("has anyone helped you out with that yet?");
+  });
+});
+
+describe("buildRealtimeInstructions precedence: DB stages > compiled_instructions > fallback", () => {
+  const COMPILED_MARKER = "STALE_COMPILED_PROMPT_MARKER_XYZ";
+  const stages: ScriptStageRow[] = [
+    {
+      stage_key: "opener",
+      stage_order: 1,
+      stage_type: "opener",
+      title: "Dashboard Opener",
+      script_text: "Hi (Client's Name), this is the dashboard flow.",
+    },
+  ];
+
+  it("builds from DB stages and IGNORES compiled_instructions when active stages exist", () => {
+    remoteHolder.current = {
+      bot: null,
+      botConfig: { compiled_instructions: `${COMPILED_MARKER} legacy text` },
+      credentials: {},
+    };
+    const prompt = buildRealtimeInstructions(null, [], stages, []);
+    expect(prompt).toContain("## Dashboard Opener");
+    expect(prompt).not.toContain(COMPILED_MARKER);
+    // Full realtime template sections still present on the stages path.
+    expect(prompt).toMatch(/# VOICE & DELIVERY/);
+    expect(prompt).toMatch(/Do NOT invent your own questions/);
+  });
+
+  it("uses the compiled_instructions override when there are no active stages", () => {
+    remoteHolder.current = {
+      bot: null,
+      botConfig: { compiled_instructions: `${COMPILED_MARKER} legacy text` },
+      credentials: {},
+    };
+    const prompt = buildRealtimeInstructions(null, [], [], []);
+    expect(prompt).toContain(COMPILED_MARKER);
+    // The compiled override does not render the hardcoded fallback script.
+    expect(prompt).not.toMatch(/# SCRIPT FLOW/);
+  });
+
+  it("falls back to the hardcoded script when there are no stages and no compiled prompt", () => {
+    remoteHolder.current = { bot: null, botConfig: null, credentials: {} };
+    const prompt = buildRealtimeInstructions(null, [], [], []);
+    expect(prompt).toMatch(/# SCRIPT FLOW/);
+    expect(prompt).toContain("has anyone helped you out with that yet?");
   });
 });
