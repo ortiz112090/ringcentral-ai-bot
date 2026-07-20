@@ -75,6 +75,8 @@ vi.mock("./supabase", () => ({
 }));
 
 import {
+  closeCallIfLive,
+  fetchBotActiveStatus,
   finalizeCallRecord,
   getLeadFields,
   mergeCapturedData,
@@ -139,6 +141,44 @@ describe("finalizeCallRecord double-finalize guard", () => {
     await finalizeCallRecord("c1", { outcome: "closed_pif" });
 
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("fetchBotActiveStatus (fresh per-call read of bots.active)", () => {
+  it("reads active + deleted_at scoped to this tenant's bots row (id = bot_id)", async () => {
+    results.push({ data: { active: true, deleted_at: null }, error: null });
+
+    const status = await fetchBotActiveStatus(BOT_ID);
+
+    expect(status).toEqual({ found: true, active: true, deleted_at: null });
+    const [c] = calls;
+    expect(c.eq.id).toBe(BOT_ID);
+    expect(c.selected).toBe("active, deleted_at");
+  });
+
+  it("returns found:false when the bots row is missing (→ caller disables)", async () => {
+    results.push({ data: null, error: null });
+    expect(await fetchBotActiveStatus(BOT_ID)).toEqual({
+      found: false,
+      active: null,
+      deleted_at: null,
+    });
+  });
+
+  it("returns null on query error (→ caller fails open)", async () => {
+    results.push({ data: null, error: { message: "boom" } });
+    expect(await fetchBotActiveStatus(BOT_ID)).toBeNull();
+  });
+});
+
+describe("closeCallIfLive tolerates a call with no calls row (no error spam)", () => {
+  it("does not error when the guarded update matches zero rows", async () => {
+    results.push({ data: [], error: null });
+    await expect(closeCallIfLive("no-such-call", "abandoned")).resolves.toBeUndefined();
+    const [c] = calls;
+    expect(c.eq.bot_id).toBe(BOT_ID);
+    expect(c.eq.call_id).toBe("no-such-call");
+    expect(c.is.ended_at).toBeNull();
   });
 });
 
