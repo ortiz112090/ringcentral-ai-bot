@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { buildVoiceTwiml, resolveCallerNumber, type VoiceDecisionInput } from "./voiceWebhook";
+import {
+  buildDisabledCallTwiml,
+  buildVoiceTwiml,
+  isBotActive,
+  resolveCallerNumber,
+  type VoiceDecisionInput,
+} from "./voiceWebhook";
 
 const base: VoiceDecisionInput = {
   callSid: "CA456",
@@ -87,6 +93,56 @@ describe("buildVoiceTwiml fail-closed decisions", () => {
     // Token is `${exp}.${hexdigest}` — assert the shape is present in the value.
     const match = xml.match(/name="token" value="(\d+\.[0-9a-f]+)"/);
     expect(match).not.toBeNull();
+  });
+});
+
+describe("isBotActive (fresh bots.active decision)", () => {
+  it("active row (active true, not deleted) → active", () => {
+    expect(isBotActive({ found: true, active: true, deleted_at: null })).toBe(true);
+  });
+
+  it("null active is treated as enabled (only explicit false disables)", () => {
+    expect(isBotActive({ found: true, active: null, deleted_at: null })).toBe(true);
+  });
+
+  it("active === false → disabled", () => {
+    expect(isBotActive({ found: true, active: false, deleted_at: null })).toBe(false);
+  });
+
+  it("missing row → disabled", () => {
+    expect(isBotActive({ found: false, active: null, deleted_at: null })).toBe(false);
+  });
+
+  it("trashed row (deleted_at set) → disabled", () => {
+    expect(isBotActive({ found: true, active: true, deleted_at: "2026-07-20T00:00:00Z" })).toBe(false);
+  });
+
+  it("null status (DB read errored) → fail open (active)", () => {
+    expect(isBotActive(null)).toBe(true);
+  });
+});
+
+describe("buildDisabledCallTwiml", () => {
+  it("dials the escalation number without a callerId when configured", () => {
+    const { xml, path } = buildDisabledCallTwiml("+15559999999");
+    expect(path).toBe("dial");
+    expect(xml).toContain("<Dial>+15559999999</Dial>");
+    expect(xml).not.toContain("callerId");
+    expect(xml).not.toContain("<Reject");
+    expect(xml).not.toContain("<Connect>");
+  });
+
+  it("rejects the call when no escalation number is configured", () => {
+    const { xml, path } = buildDisabledCallTwiml(undefined);
+    expect(path).toBe("reject");
+    expect(xml).toContain("<Reject");
+    expect(xml).not.toContain("<Dial>");
+  });
+
+  it("treats a blank/whitespace escalation number as unset → reject", () => {
+    const { xml, path } = buildDisabledCallTwiml("   ");
+    expect(path).toBe("reject");
+    expect(xml).toContain("<Reject");
   });
 });
 

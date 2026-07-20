@@ -13,6 +13,41 @@ import {
  * We log the error and continue — a dropped log row is far cheaper than a dropped call.
  */
 
+/** Fresh per-call snapshot of this tenant's enabled/disabled state from `bots`. */
+export interface BotActiveStatus {
+  /** true when a `bots` row exists for this tenant (id = bot_id). */
+  found: boolean;
+  /** `bots.active`; null is treated as enabled (only an explicit false disables). */
+  active: boolean | null;
+  /** `bots.deleted_at`; non-null means the bot is trashed → disabled. */
+  deleted_at: string | null;
+}
+
+/**
+ * Read this tenant's enable/disable state straight from `bots` (id = bot_id),
+ * bypassing the remoteConfig cache. The dashboard toggle and the trash system both
+ * live on `bots.active`, so the call path must re-read it FRESH on every inbound
+ * call. Returns the row snapshot on success (found=false when the row is missing),
+ * or null ONLY on a query error so the caller can fail open (can't verify → don't
+ * brick the bot; the downstream kill-switch still applies).
+ */
+export async function fetchBotActiveStatus(
+  botId: string = BOT_ID
+): Promise<BotActiveStatus | null> {
+  const { data, error } = await supabase
+    .from("bots")
+    .select("active, deleted_at")
+    .eq("id", botId)
+    .maybeSingle();
+  if (error) {
+    logger.error("Failed to read bot active status", { botId, error: error.message });
+    return null;
+  }
+  if (!data) return { found: false, active: null, deleted_at: null };
+  const row = data as { active: boolean | null; deleted_at: string | null };
+  return { found: true, active: row.active ?? null, deleted_at: row.deleted_at ?? null };
+}
+
 /**
  * Phase 1 of the two-phase call write: insert the row at CALL START with
  * ended_at left NULL so the dashboard shows a live (in-progress) call.

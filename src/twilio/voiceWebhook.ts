@@ -7,10 +7,15 @@ import {
   twilioVoiceWebhookUrl,
 } from "../config";
 import { logger } from "../logger";
-import { isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
+import { BOT_ID, isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "./client";
 import { createStreamToken } from "./streamToken";
-import { closeCallIfLive, createCallRecord } from "../db/queries";
+import {
+  BotActiveStatus,
+  closeCallIfLive,
+  createCallRecord,
+  fetchBotActiveStatus,
+} from "../db/queries";
 
 /**
  * Twilio inbound-call webhook (POST /webhooks/twilio/voice) + status callback
@@ -106,6 +111,41 @@ function buildFallbackTwiml(escalationNumber: string | undefined): string {
 }
 
 /**
+ * Decide from a fresh `bots` snapshot whether the bot should answer this call.
+ * Disabled when the row is missing, `active` is explicitly false, or the row is
+ * trashed (`deleted_at` set). A null status means the fresh read errored — fail
+ * OPEN (treat as active) so a transient DB blip never bricks the line; the
+ * downstream kill switch (isBotEnabled) still guards the answer path.
+ */
+export function isBotActive(status: BotActiveStatus | null): boolean {
+  if (status === null) return true; // couldn't verify → fail open
+  if (!status.found) return false; // no tenant row → disabled
+  if (status.active === false) return false; // dashboard toggle / trash
+  if (status.deleted_at) return false; // trashed
+  return true;
+}
+
+/**
+ * TwiML for a disabled bot's inbound call. Forwards to the human escalation number
+ * when configured (default <Dial> keeps the ORIGINAL caller's caller ID — no
+ * callerId attribute), otherwise rejects the call. Returns the taken path for
+ * logging. NEVER opens a media stream or a Realtime session.
+ */
+export function buildDisabledCallTwiml(escalationNumber: string | undefined): {
+  xml: string;
+  path: "dial" | "reject";
+} {
+  const response = new Twiml.VoiceResponse();
+  const number = escalationNumber?.trim();
+  if (number) {
+    response.dial({}, number);
+    return { xml: response.toString(), path: "dial" };
+  }
+  response.reject();
+  return { xml: response.toString(), path: "reject" };
+}
+
+/**
  * Pure fail-closed TwiML decision. Gate order per the Twilio-native rebuild spec:
  *   a. Kill switch (bot disabled) FIRST → fallback TwiML. Ordered before the
  *      number check so a disabled bot never bridges regardless of routing.
@@ -188,6 +228,23 @@ export async function handleVoiceWebhook(req: Request, res: Response): Promise<R
   //    fail-closed TwiML from effective config + kill switch.
   const { twilio: tw } = await resolveEffectiveConfig();
   const callSid = params.CallSid ?? null;
+
+  // 3a. Active-flag gate: FRESH per-call read of bots.active (dashboard toggle +
+  //     trash system). A disabled/missing/trashed bot never answers — forward to
+  //     the escalation number or reject, with NO calls row, NO Realtime session,
+  //     and NO media stream.
+  const activeStatus = await fetchBotActiveStatus();
+  if (!isBotActive(activeStatus)) {
+    const { xml: disabledXml, path } = buildDisabledCallTwiml(tw.escalationNumber);
+    logger.info("Bot disabled — forwarding call to escalation", {
+      botId: BOT_ID,
+      callSid,
+      path,
+    });
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(disabledXml);
+  }
+
   const callerNumber = resolveCallerNumber({
     from: params.From ?? null,
     forwardedFrom: params.ForwardedFrom ?? null,

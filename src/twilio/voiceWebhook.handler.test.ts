@@ -17,6 +17,7 @@ vi.mock("../config", () => ({
   resolveEffectiveConfig: vi.fn(async () => ({ twilio: effectiveTwilio })),
 }));
 vi.mock("../db/remoteConfig", () => ({
+  BOT_ID: "00000000-0000-0000-0000-000000000001",
   loadRemoteConfig: vi.fn(async () => ({ bot: null, botConfig: null, credentials: {} })),
   isBotEnabled: vi.fn(() => true),
 }));
@@ -25,9 +26,11 @@ vi.mock("./client", () => ({
 }));
 const createCallRecord = vi.fn(async () => {});
 const closeCallIfLive = vi.fn(async () => {});
+const fetchBotActiveStatus = vi.fn(async () => ({ found: true, active: true, deleted_at: null }));
 vi.mock("../db/queries", () => ({
   createCallRecord: (...a: any[]) => createCallRecord(...a),
   closeCallIfLive: (...a: any[]) => closeCallIfLive(...a),
+  fetchBotActiveStatus: (...a: any[]) => fetchBotActiveStatus(...a),
 }));
 
 import { handleVoiceWebhook, handleStatusCallback } from "./voiceWebhook";
@@ -66,6 +69,7 @@ const validParams = { CallSid: "CA456", To: "+15550000001", From: "+15557654321"
 beforeEach(() => {
   vi.clearAllMocks();
   (isBotEnabled as any).mockReturnValue(true);
+  fetchBotActiveStatus.mockResolvedValue({ found: true, active: true, deleted_at: null });
 });
 
 describe("handleVoiceWebhook signature validation (fail-closed)", () => {
@@ -142,6 +146,82 @@ describe("handleVoiceWebhook signature validation (fail-closed)", () => {
     );
     expect(res.body).not.toContain("<Connect>");
     expect(createCallRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleVoiceWebhook bots.active gate (fresh per-call read)", () => {
+  beforeEach(() => {
+    vi.spyOn(twilio, "validateRequest").mockReturnValue(true);
+  });
+
+  it("active bot → unchanged answer TwiML (Connect/Stream), calls row INSERTed", async () => {
+    fetchBotActiveStatus.mockResolvedValue({ found: true, active: true, deleted_at: null });
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.body).toContain("<Connect>");
+    expect(res.body).toContain("<Stream");
+    expect(createCallRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it("inactive bot + escalation number → <Dial> with the number, no calls row, no stream", async () => {
+    fetchBotActiveStatus.mockResolvedValue({ found: true, active: false, deleted_at: null });
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("<Dial>+15559999999</Dial>");
+    expect(res.body).not.toContain("<Connect>");
+    expect(res.body).not.toContain("<Stream");
+    expect(createCallRecord).not.toHaveBeenCalled();
+  });
+
+  it("inactive bot + no escalation number → <Reject/>, no calls row", async () => {
+    effectiveTwilio.escalationNumber = "";
+    fetchBotActiveStatus.mockResolvedValue({ found: true, active: false, deleted_at: null });
+    const res = fakeRes();
+    try {
+      await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+      expect(res.body).toContain("<Reject");
+      expect(res.body).not.toContain("<Dial>");
+      expect(res.body).not.toContain("<Connect>");
+      expect(createCallRecord).not.toHaveBeenCalled();
+    } finally {
+      effectiveTwilio.escalationNumber = "+15559999999";
+    }
+  });
+
+  it("missing bots row → treated as disabled (forwarded), no calls row", async () => {
+    fetchBotActiveStatus.mockResolvedValue({ found: false, active: null, deleted_at: null });
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.body).toContain("<Dial>+15559999999</Dial>");
+    expect(createCallRecord).not.toHaveBeenCalled();
+  });
+
+  it("trashed bot (deleted_at set) → treated as disabled (forwarded)", async () => {
+    fetchBotActiveStatus.mockResolvedValue({
+      found: true,
+      active: true,
+      deleted_at: "2026-07-20T00:00:00Z",
+    });
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.body).toContain("<Dial>+15559999999</Dial>");
+    expect(createCallRecord).not.toHaveBeenCalled();
+  });
+
+  it("fresh read: flipping active between two webhook calls changes behavior (no restart)", async () => {
+    // First call: active → answers with a media stream.
+    fetchBotActiveStatus.mockResolvedValueOnce({ found: true, active: true, deleted_at: null });
+    const first = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), first);
+    expect(first.body).toContain("<Stream");
+
+    // Second call: flipped to inactive in the DB → forwards, no stream.
+    fetchBotActiveStatus.mockResolvedValueOnce({ found: true, active: false, deleted_at: null });
+    const second = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), second);
+    expect(second.body).not.toContain("<Stream");
+    expect(second.body).toContain("<Dial>+15559999999</Dial>");
   });
 });
 
