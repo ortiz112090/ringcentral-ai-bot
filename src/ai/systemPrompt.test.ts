@@ -45,6 +45,12 @@ describe("buildRealtimeInstructions unclear-speech honesty rules", () => {
     expect(prompt).toMatch(/MVR/);
     expect(prompt).toMatch(/CLOSING DISCIPLINE/);
   });
+
+  it("tells the model to continue immediately after capture_lead_info, not announce logging", () => {
+    expect(prompt).toMatch(/immediately continue/i);
+    expect(prompt).toMatch(/do NOT announce/i);
+    expect(prompt).toMatch(/let me just log that/i);
+  });
 });
 
 describe("buildRealtimeInstructions adherence + VOICE & DELIVERY (both paths)", () => {

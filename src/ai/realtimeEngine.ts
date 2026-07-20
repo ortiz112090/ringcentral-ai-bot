@@ -618,13 +618,24 @@ export class RealtimeEngine {
         void this.handleToolCall(event.name, event.arguments, event.call_id);
         break;
 
-      case "error":
+      case "error": {
+        // A stray response.create sent while a response is still in flight comes back
+        // as this non-fatal error. It is expected on the auto-continue-after-tool path
+        // (see handleToolCall) — log at warn and ignore rather than escalating the call.
+        const errCode = event.error?.code ?? event.code;
+        if (errCode === "conversation_already_has_active_response") {
+          logger.warn("Realtime response already active; ignoring extra response.create", {
+            callId: this.state.callId,
+          });
+          break;
+        }
         logger.error("Realtime API error event; escalating", {
           callId: this.state.callId,
           error: JSON.stringify(event.error ?? event),
         });
         void this.escalate("model_error");
         break;
+      }
 
       default:
         // Many event types (deltas, rate-limit info, etc.) are intentionally ignored.
@@ -685,6 +696,17 @@ export class RealtimeEngine {
           output: JSON.stringify(output),
         },
       });
+
+      // The Realtime model does NOT continue speaking on its own after a
+      // function_call_output — without an explicit response.create it goes silent
+      // until the caller speaks again. Kick the next turn immediately, but ONLY for
+      // tools where continuing makes sense: capture_lead_info and record_close_attempt.
+      // escalate_to_human / set_call_outcome are transferring/ending the call, so we
+      // must NOT auto-continue there. A response may occasionally still be in flight;
+      // handleEvent tolerates the resulting "conversation_already_has_active_response".
+      if (name === "capture_lead_info" || name === "record_close_attempt") {
+        this.send({ type: "response.create" });
+      }
     }
   }
 
