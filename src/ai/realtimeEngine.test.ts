@@ -494,6 +494,15 @@ describe("validateCapturedValues", () => {
     expect(validateCapturedValues(fields, { first_name: "!!!" }).invalid.first_name).toBeDefined();
   });
 
+  it("last_name: validates as a free-text name (letters/spaces/hyphens/apostrophes), rejects gibberish", () => {
+    const fields = [f({ field_key: "last_name", field_type: "text" })];
+    expect(validateCapturedValues(fields, { last_name: "O'Brien" }).valid.last_name).toBe("O'Brien");
+    expect(validateCapturedValues(fields, { last_name: "Smith-Jones" }).valid.last_name).toBe("Smith-Jones");
+    expect(validateCapturedValues(fields, { last_name: "   " }).invalid.last_name).toBeDefined();
+    expect(validateCapturedValues(fields, { last_name: "123" }).invalid.last_name).toBeDefined();
+    expect(validateCapturedValues(fields, { last_name: "!!!" }).invalid.last_name).toBeDefined();
+  });
+
   it("keeps valid keys and drops only the invalid ones (mixed submission)", () => {
     const fields = [
       f({ field_key: "first_name", field_type: "text" }),
