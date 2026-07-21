@@ -422,6 +422,7 @@ export async function upsertLead(lead: LeadRecord): Promise<void> {
     "zip_code",
     "date_of_birth",
     "license_number",
+    "license_state",
     "quote_amount_pif",
     "quote_amount_monthly",
     "carrier",

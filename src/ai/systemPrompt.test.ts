@@ -51,6 +51,12 @@ describe("buildRealtimeInstructions unclear-speech honesty rules", () => {
     expect(prompt).toMatch(/do NOT announce/i);
     expect(prompt).toMatch(/let me just log that/i);
   });
+
+  it("adds the field-completion hard rule (ask only for the missing part, ask for the license state)", () => {
+    expect(prompt).toMatch(/ask only for the specific missing|ask ONLY for the specific missing/i);
+    expect(prompt).toMatch(/never ask the caller to repeat/i);
+    expect(prompt).toMatch(/always ask what state/i);
+  });
 });
 
 describe("buildRealtimeInstructions adherence + VOICE & DELIVERY (both paths)", () => {

@@ -334,7 +334,7 @@ describe("buildCaptureLeadTool dynamic schema", () => {
     const tool = buildCaptureLeadTool([]);
     const props = (tool.parameters as any).properties;
     expect(Object.keys(props).sort()).toEqual(
-      ["carrier", "date_of_birth", "first_name", "license_number", "quote_amount_monthly", "quote_amount_pif", "zip_code"].sort()
+      ["carrier", "date_of_birth", "first_name", "license_number", "license_state", "quote_amount_monthly", "quote_amount_pif", "zip_code"].sort()
     );
     expect(props.carrier.enum).toEqual(["progressive", "dairyland", "other"]);
   });
@@ -395,7 +395,7 @@ describe("dynamic capture tool wiring + captured_data merge", () => {
 
   it("merges custom-only captures without a leads-table upsert", async () => {
     const { ws, state } = await startEngine();
-    const args = { start_timeline: "asap", address: "1 Main St" };
+    const args = { start_timeline: "asap", address: "1 Main St, Springfield, 90210" };
     ws.emit(
       "message",
       Buffer.from(
@@ -508,6 +508,92 @@ describe("validateCapturedValues", () => {
     const res = validateCapturedValues([], { note: "call back later", junk: "   " });
     expect(res.valid).toEqual({ note: "call back later" });
     expect(res.invalid.junk).toBeDefined();
+  });
+
+  describe("address field completion", () => {
+    const fields = [f({ field_key: "address", field_type: "text" })];
+
+    it("passes a full address with a street number and 5-digit zip", () => {
+      const res = validateCapturedValues(fields, {
+        address: "12 Gold Street, Springfield, 90210",
+      });
+      expect(res.invalid).toEqual({});
+      expect(res.valid.address).toBe("12 Gold Street, Springfield, 90210");
+    });
+
+    it("rejects a partial address that is missing the zip, naming zip", () => {
+      const res = validateCapturedValues(fields, { address: "12 Gold Street, Springfield" });
+      expect(res.valid).toEqual({});
+      expect(res.invalid.address).toMatch(/zip/i);
+    });
+
+    it("rejects a fragment with no street number, naming the street number", () => {
+      const res = validateCapturedValues(fields, { address: "Gold Street" });
+      expect(res.invalid.address).toMatch(/street number/i);
+    });
+
+    it("rejects a number+zip with no city/street name, naming the city", () => {
+      const res = validateCapturedValues(fields, { address: "12 90210" });
+      expect(res.invalid.address).toMatch(/city/i);
+    });
+  });
+
+  describe("date_of_birth field completion", () => {
+    const fields = [f({ field_key: "date_of_birth", field_type: "date" })];
+
+    it("passes a full valid DOB", () => {
+      const res = validateCapturedValues(fields, { date_of_birth: "March 5, 1990" });
+      expect(res.invalid).toEqual({});
+      expect(res.valid.date_of_birth).toBe("March 5, 1990");
+    });
+
+    it("rejects a partial DOB (month + year only), naming the missing day", () => {
+      const res = validateCapturedValues(fields, { date_of_birth: "March 1990" });
+      expect(res.valid).toEqual({});
+      expect(res.invalid.date_of_birth).toMatch(/day/i);
+    });
+
+    it("rejects a numeric fragment with fewer than three parts", () => {
+      const res = validateCapturedValues(fields, { date_of_birth: "3/1990" });
+      expect(res.invalid.date_of_birth).toMatch(/incomplete|month|day|year/i);
+    });
+  });
+
+  describe("license_number field completion", () => {
+    const fields = [f({ field_key: "license_number", field_type: "text" })];
+
+    it("strips dashes/spaces before saving and passes", () => {
+      const res = validateCapturedValues(fields, { license_number: "D123-4567 89" });
+      expect(res.invalid).toEqual({});
+      expect(res.valid.license_number).toBe("D123456789");
+    });
+
+    it("rejects an obviously truncated single-character number", () => {
+      const res = validateCapturedValues(fields, { license_number: "D" });
+      expect(res.valid).toEqual({});
+      expect(res.invalid.license_number).toMatch(/incomplete/i);
+    });
+  });
+
+  describe("license_state field completion", () => {
+    const fields = [f({ field_key: "license_state", field_type: "text" })];
+
+    it("normalizes a full state name to its 2-letter code", () => {
+      const res = validateCapturedValues(fields, { license_state: "california" });
+      expect(res.invalid).toEqual({});
+      expect(res.valid.license_state).toBe("CA");
+    });
+
+    it("normalizes a lower-case abbreviation to upper-case", () => {
+      const res = validateCapturedValues(fields, { license_state: "ca" });
+      expect(res.valid.license_state).toBe("CA");
+    });
+
+    it("rejects a string that is not a recognizable US state", () => {
+      const res = validateCapturedValues(fields, { license_state: "Freedonia" });
+      expect(res.valid).toEqual({});
+      expect(res.invalid.license_state).toMatch(/state/i);
+    });
   });
 });
 

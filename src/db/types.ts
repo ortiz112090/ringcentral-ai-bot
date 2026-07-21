@@ -46,6 +46,9 @@ export interface LeadRecord {
   date_of_birth?: string | null;
   // Sensitive: driver's license number. Stored for quoting only; never used to run an MVR.
   license_number?: string | null;
+  // 2-letter US state code that issued the license (normalized upper-case, e.g. "CA").
+  // Always collected as its own question; NOT assumed to match the address state.
+  license_state?: string | null;
   quote_amount_pif?: number | null;
   quote_amount_monthly?: number | null;
   carrier?: Carrier | null;

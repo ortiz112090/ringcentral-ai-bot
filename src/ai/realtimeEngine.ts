@@ -56,6 +56,7 @@ const LEADS_TABLE_KEYS = [
   "zip_code",
   "date_of_birth",
   "license_number",
+  "license_state",
   "quote_amount_pif",
   "quote_amount_monthly",
   "carrier",
@@ -78,6 +79,10 @@ const FALLBACK_CAPTURE_LEAD_TOOL = {
       zip_code: { type: "string" },
       date_of_birth: { type: "string", description: "YYYY-MM-DD if known" },
       license_number: { type: "string" },
+      license_state: {
+        type: "string",
+        description: "2-letter state that issued the license, e.g. CA",
+      },
       quote_amount_pif: { type: "number" },
       quote_amount_monthly: { type: "number" },
       carrier: { type: "string", enum: ["progressive", "dairyland", "other"] },
@@ -197,6 +202,155 @@ function isZipField(field: LeadFieldRow | undefined, key: string): boolean {
   return label.includes("zip");
 }
 
+/** Lower-cased label for a field, or "" when absent. */
+function labelOf(field: LeadFieldRow | undefined): string {
+  return typeof field?.label === "string" ? field.label.toLowerCase() : "";
+}
+
+/** True for the caller's mailing address field (needs street + city + zip). */
+function isAddressField(field: LeadFieldRow | undefined, key: string): boolean {
+  return key === "address" || labelOf(field).includes("address");
+}
+
+/** True for the driver's-license NUMBER field. */
+function isLicenseNumberField(field: LeadFieldRow | undefined, key: string): boolean {
+  if (key === "license_number") return true;
+  const label = labelOf(field);
+  return label.includes("license") && (label.includes("number") || label.includes("#"));
+}
+
+/** True for the license-STATE companion field (2-letter state that issued the license). */
+function isLicenseStateField(field: LeadFieldRow | undefined, key: string): boolean {
+  if (key === "license_state") return true;
+  const label = labelOf(field);
+  return label.includes("license") && label.includes("state");
+}
+
+/** Recognized US states / territories: full name (lower-case) → 2-letter code. */
+const US_STATE_NAME_TO_ABBR: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", florida: "FL", georgia: "GA",
+  hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA",
+  kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD",
+  massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS",
+  missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV",
+  "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+  "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK",
+  oregon: "OR", pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
+  "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT",
+  virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI",
+  wyoming: "WY", "district of columbia": "DC",
+};
+
+/** Set of valid 2-letter US state / territory abbreviations. */
+const US_STATE_ABBRS = new Set(Object.values(US_STATE_NAME_TO_ABBR));
+
+/**
+ * Validate a mailing address: it must contain a street number (a digit) AND a
+ * 5-digit ZIP AND at least two alphabetic words (street name + city). Returns a
+ * targeted rejection reason naming the missing piece so the model re-asks only for
+ * that part — never the whole address. State is intentionally not required (derived
+ * server-side from the zip later).
+ */
+function validateAddress(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const raw = String(value).trim();
+  if (!/\d/.test(raw)) {
+    return { ok: false, reason: "address is missing the street number" };
+  }
+  if (!/\b\d{5}\b/.test(raw)) {
+    return { ok: false, reason: "address is missing the 5-digit zip code" };
+  }
+  const words = raw.match(/[A-Za-z]{2,}/g) ?? [];
+  if (words.length < 2) {
+    return { ok: false, reason: "address is missing the city or street name" };
+  }
+  return { ok: true, value: raw };
+}
+
+/**
+ * Validate a date of birth as a FULL calendar date (month, day, AND year). Partial
+ * dates like "March 1990" (no day) are rejected with a reason naming the missing
+ * part so the model asks only for that piece. Accepts month-name ("March 5, 1990")
+ * and numeric-separated ("3/5/1990", "1990-03-05") shapes.
+ */
+function validateDateOfBirth(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const raw = String(value).trim();
+  if (raw === "") return { ok: false, reason: "date of birth is required" };
+
+  const numericParts = raw.split(/[/.\-]/).map((p) => p.trim()).filter((p) => p !== "");
+  const allNumeric = numericParts.length > 0 && numericParts.every((p) => /^\d+$/.test(p));
+  if (allNumeric) {
+    if (numericParts.length < 3) {
+      return {
+        ok: false,
+        reason: "date of birth is incomplete — need the month, day, and year",
+      };
+    }
+    if (Number.isNaN(Date.parse(raw))) {
+      return { ok: false, reason: "date of birth is not a valid calendar date" };
+    }
+    return { ok: true, value: raw };
+  }
+
+  const hasMonthName = /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/i.test(raw);
+  const hasYear = /\b\d{4}\b/.test(raw);
+  const hasDay = /\b\d{1,2}\b/.test(raw.replace(/\b\d{4}\b/g, ""));
+  if (hasMonthName) {
+    if (!hasYear) return { ok: false, reason: "date of birth is missing the year" };
+    if (!hasDay) return { ok: false, reason: "date of birth is missing the day" };
+    if (Number.isNaN(Date.parse(raw))) {
+      return { ok: false, reason: "date of birth is not a valid calendar date" };
+    }
+    return { ok: true, value: raw };
+  }
+
+  return {
+    ok: false,
+    reason: "must be a full date of birth with month, day, and year",
+  };
+}
+
+/**
+ * Validate a driver's license number: strip incoming dashes/spaces (the bot must
+ * never add them when saving/speaking), require alphanumeric only, and enforce a
+ * plausible 4–20 char length so a single stray character is rejected. Returns the
+ * stripped value to persist.
+ */
+function validateLicenseNumber(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const stripped = String(value).replace(/[\s-]/g, "");
+  if (!/^[A-Za-z0-9]+$/.test(stripped)) {
+    return { ok: false, reason: "license number must contain only letters and digits" };
+  }
+  if (stripped.length < 4 || stripped.length > 20) {
+    return { ok: false, reason: "license number looks incomplete" };
+  }
+  return { ok: true, value: stripped };
+}
+
+/**
+ * Validate the license STATE: accept a 2-letter code or a full state name and
+ * normalize to the uppercase 2-letter abbreviation ("california" → "CA"). Rejects
+ * anything that isn't a recognizable US state.
+ */
+function validateLicenseState(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const raw = String(value).trim().toLowerCase();
+  if (raw === "") return { ok: false, reason: "license state is required" };
+  if (US_STATE_NAME_TO_ABBR[raw]) {
+    return { ok: true, value: US_STATE_NAME_TO_ABBR[raw] };
+  }
+  const upper = raw.toUpperCase();
+  if (US_STATE_ABBRS.has(upper)) return { ok: true, value: upper };
+  return { ok: false, reason: "must be a valid US state (e.g. CA or California)" };
+}
+
 /**
  * Validate ONE captured value against its lead_fields definition. Returns either the
  * normalized value to store or a rejection reason. The ZIP rule takes precedence over
@@ -219,6 +373,13 @@ function validateOne(
       : { ok: false, reason: "must be a 5-digit ZIP code" };
   }
 
+  // Field-completion rules: reject partial answers with a targeted reason so the
+  // model re-asks only for the missing piece. license_state is checked before
+  // license_number so the "license" + "state" label can't fall into the number rule.
+  if (isLicenseStateField(field, key)) return validateLicenseState(value);
+  if (isLicenseNumberField(field, key)) return validateLicenseNumber(value);
+  if (isAddressField(field, key)) return validateAddress(value);
+
   const type = field?.field_type ?? "text";
 
   if (type === "number") {
@@ -229,10 +390,8 @@ function validateOne(
       : { ok: false, reason: "must be a number" };
   }
 
-  if (type === "date") {
-    return !Number.isNaN(Date.parse(String(value)))
-      ? { ok: true, value }
-      : { ok: false, reason: "must be a valid date" };
+  if (type === "date" || key === "date_of_birth" || labelOf(field).includes("birth")) {
+    return validateDateOfBirth(value);
   }
 
   if (type === "choice" && Array.isArray(field?.choices) && field!.choices!.length > 0) {
@@ -740,6 +899,7 @@ export class RealtimeEngine {
           zip_code: str(valid.zip_code),
           date_of_birth: str(valid.date_of_birth),
           license_number: str(valid.license_number),
+          license_state: str(valid.license_state),
           quote_amount_pif: num(valid.quote_amount_pif),
           quote_amount_monthly: num(valid.quote_amount_monthly),
           carrier,
