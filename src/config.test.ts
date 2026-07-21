@@ -51,6 +51,31 @@ describe("resolveEffectiveConfig realtimeSpeed", () => {
   });
 });
 
+describe("resolveEffectiveConfig botRole", () => {
+  const original = process.env.BOT_ROLE;
+  beforeEach(() => {
+    delete process.env.BOT_ROLE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.BOT_ROLE;
+    else process.env.BOT_ROLE = original;
+  });
+
+  it("defaults to answer_calls with no env override or bot_config value", async () => {
+    expect((await resolveEffectiveConfig()).botRole).toBe("answer_calls");
+  });
+
+  it("respects the BOT_ROLE env override (normalized)", async () => {
+    process.env.BOT_ROLE = "  Texting ";
+    expect((await resolveEffectiveConfig()).botRole).toBe("texting");
+  });
+
+  it("falls back to the default on an unknown BOT_ROLE", async () => {
+    process.env.BOT_ROLE = "banana";
+    expect((await resolveEffectiveConfig()).botRole).toBe("answer_calls");
+  });
+});
+
 describe("resolveEffectiveConfig transcribeModel", () => {
   const original = process.env.OPENAI_TRANSCRIBE_MODEL;
 

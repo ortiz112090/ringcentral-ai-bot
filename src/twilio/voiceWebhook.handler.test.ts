@@ -10,11 +10,12 @@ const effectiveTwilio = {
   voiceProvider: "twilio",
   escalationNumber: "+15559999999",
 };
+let mockRole = "answer_calls";
 vi.mock("../config", () => ({
   mediaStreamWssUrl: (callSid: string) => `wss://bot.example.com/media/${callSid}`,
   twilioVoiceWebhookUrl: () => "https://bot.example.com/webhooks/twilio/voice",
   twilioStatusCallbackUrl: () => "https://bot.example.com/webhooks/twilio/status",
-  resolveEffectiveConfig: vi.fn(async () => ({ twilio: effectiveTwilio })),
+  resolveEffectiveConfig: vi.fn(async () => ({ twilio: effectiveTwilio, botRole: mockRole })),
 }));
 vi.mock("../db/remoteConfig", () => ({
   BOT_ID: "00000000-0000-0000-0000-000000000001",
@@ -69,6 +70,7 @@ const validParams = { CallSid: "CA456", To: "+15550000001", From: "+15557654321"
 beforeEach(() => {
   vi.clearAllMocks();
   (isBotEnabled as any).mockReturnValue(true);
+  mockRole = "answer_calls";
   fetchBotActiveStatus.mockResolvedValue({ found: true, active: true, deleted_at: null });
 });
 
@@ -135,6 +137,27 @@ describe("handleVoiceWebhook signature validation (fail-closed)", () => {
     expect(res.body).toContain("<Dial>");
     expect(res.body).not.toContain("<Connect>");
     expect(createCallRecord).not.toHaveBeenCalled();
+  });
+
+  it("texting-role bot → polite reject TwiML, no bridge, no INSERT", async () => {
+    vi.spyOn(twilio, "validateRequest").mockReturnValue(true);
+    mockRole = "texting";
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("<Say");
+    expect(res.body).toContain("<Hangup");
+    expect(res.body).not.toContain("<Connect>");
+    expect(createCallRecord).not.toHaveBeenCalled();
+  });
+
+  it("outbound_calls role → inbound call still answers (Connect/Stream) for callbacks", async () => {
+    vi.spyOn(twilio, "validateRequest").mockReturnValue(true);
+    mockRole = "outbound_calls";
+    const res = fakeRes();
+    await handleVoiceWebhook(fakeReq("good-sig", validParams), res);
+    expect(res.body).toContain("<Connect>");
+    expect(res.body).toContain("<Stream");
   });
 
   it("valid signature + To mismatch → fallback, logged, no INSERT", async () => {
