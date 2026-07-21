@@ -199,3 +199,41 @@ describe("buildRealtimeInstructions precedence: DB stages > compiled_instruction
     expect(prompt).toContain("has anyone helped you out with that yet?");
   });
 });
+
+describe("buildRealtimeInstructions acknowledgment variety + first/last name gate (both paths)", () => {
+  const stages: ScriptStageRow[] = [
+    { stage_key: "opener", stage_order: 1, stage_type: "opener", title: "Warm Opener", script_text: "Hi (Client's Name)." },
+    { stage_key: "qualify", stage_order: 2, stage_type: "qualify", title: "Qualify Need", script_text: "When do you need this filed?" },
+  ];
+
+  const fallbackPrompt = buildRealtimeInstructions(null, []);
+  const stagesPrompt = buildRealtimeInstructions({ first_name: "Jordan" } as any, [], stages, []);
+
+  it("includes the acknowledgment-variety instruction with all four phrases (fallback path)", () => {
+    expect(fallbackPrompt).toMatch(/VARY the acknowledgment/i);
+    expect(fallbackPrompt).toMatch(/never use the same one twice in a row/i);
+    expect(fallbackPrompt).toContain('"Awesome!"');
+    expect(fallbackPrompt).toContain('"Great!"');
+    expect(fallbackPrompt).toContain('"Perfect!"');
+    expect(fallbackPrompt).toContain('"Mhm, no problem!"');
+  });
+
+  it("includes the acknowledgment-variety instruction with all four phrases (DB stages path)", () => {
+    expect(stagesPrompt).toMatch(/VARY the acknowledgment/i);
+    expect(stagesPrompt).toContain('"Awesome!"');
+    expect(stagesPrompt).toContain('"Great!"');
+    expect(stagesPrompt).toContain('"Perfect!"');
+    expect(stagesPrompt).toContain('"Mhm, no problem!"');
+  });
+
+  it("includes the first+last name gate hard rule (fallback path)", () => {
+    expect(fallbackPrompt).toMatch(/both first and last name/i);
+    expect(fallbackPrompt).toMatch(/ask specifically for the last name/i);
+    expect(fallbackPrompt).toMatch(/never ask for the first name again/i);
+  });
+
+  it("includes the first+last name gate hard rule (DB stages path)", () => {
+    expect(stagesPrompt).toMatch(/both first and last name/i);
+    expect(stagesPrompt).toMatch(/ask specifically for the last name/i);
+  });
+});

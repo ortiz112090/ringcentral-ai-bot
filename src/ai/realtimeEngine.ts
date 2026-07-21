@@ -212,6 +212,27 @@ function isAddressField(field: LeadFieldRow | undefined, key: string): boolean {
   return key === "address" || labelOf(field).includes("address");
 }
 
+/** True for a person-name field (first_name / last_name), by key or label. */
+function isNameField(field: LeadFieldRow | undefined, key: string): boolean {
+  return key === "first_name" || key === "last_name" || labelOf(field).includes("name");
+}
+
+/**
+ * Validate a person's name: free text of letters, spaces, hyphens, and apostrophes
+ * only. Rejects empty/whitespace and gibberish (anything with digits or other
+ * punctuation, or no letters at all) — same bar as other text fields.
+ */
+function validateName(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const raw = String(value).trim();
+  if (raw === "") return { ok: false, reason: "name is required" };
+  if (!/[a-zA-Z]/.test(raw) || !/^[a-zA-Z\s'-]+$/.test(raw)) {
+    return { ok: false, reason: "must be a name (letters, spaces, hyphens, apostrophes)" };
+  }
+  return { ok: true, value };
+}
+
 /** True for the driver's-license NUMBER field. */
 function isLicenseNumberField(field: LeadFieldRow | undefined, key: string): boolean {
   if (key === "license_number") return true;
@@ -379,6 +400,7 @@ function validateOne(
   if (isLicenseStateField(field, key)) return validateLicenseState(value);
   if (isLicenseNumberField(field, key)) return validateLicenseNumber(value);
   if (isAddressField(field, key)) return validateAddress(value);
+  if (isNameField(field, key)) return validateName(value);
 
   const type = field?.field_type ?? "text";
 
