@@ -584,6 +584,93 @@ describe("capture_lead_info server-side validation wiring", () => {
   });
 });
 
+describe("auto-continue after tool calls (response.create)", () => {
+  function fireTool(ws: any, name: string, args: Record<string, unknown>, callId: string) {
+    ws.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.function_call_arguments.done",
+          name,
+          arguments: JSON.stringify(args),
+          call_id: callId,
+        })
+      )
+    );
+  }
+
+  // Only response.create frames sent AFTER the initial opener (index 0) count as
+  // continuations; drop the opener so we assert on the tool-driven one.
+  function responseCreatesAfterOpener(ws: any): any[] {
+    const all = ws.sentJson().filter((m: any) => m.type === "response.create");
+    return all.slice(1);
+  }
+
+  it("sends response.create after a capture_lead_info function_call_output", async () => {
+    const { ws } = await startEngine();
+    fireTool(ws, "capture_lead_info", { first_name: "Sam" }, "fc_cont");
+    await new Promise((r) => setTimeout(r, 0));
+
+    const frames = ws.sentJson();
+    const ackIdx = frames.findIndex(
+      (m: any) => m.type === "conversation.item.create" && m.item?.call_id === "fc_cont"
+    );
+    const contIdx = frames.findIndex(
+      (m: any, i: number) => i > ackIdx && m.type === "response.create"
+    );
+    expect(ackIdx).toBeGreaterThanOrEqual(0);
+    // A response.create follows the function_call_output for capture_lead_info.
+    expect(contIdx).toBeGreaterThan(ackIdx);
+  });
+
+  it("sends response.create after a record_close_attempt function_call_output", async () => {
+    const { ws } = await startEngine();
+    fireTool(ws, "record_close_attempt", { attempt_number: 1 }, "fc_close");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(responseCreatesAfterOpener(ws).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does NOT send response.create after escalate_to_human", async () => {
+    const { ws } = await startEngine();
+    fireTool(ws, "escalate_to_human", { reason: "wants a human" }, "fc_esc");
+    await new Promise((r) => setTimeout(r, 0));
+    // Only the opener response.create should exist; no continuation for escalation.
+    expect(responseCreatesAfterOpener(ws)).toEqual([]);
+  });
+
+  it("does NOT send response.create after set_call_outcome", async () => {
+    const { ws } = await startEngine();
+    fireTool(ws, "set_call_outcome", { outcome: "closed_pif" }, "fc_out");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(responseCreatesAfterOpener(ws)).toEqual([]);
+  });
+
+  it("ignores a conversation_already_has_active_response error without escalating", async () => {
+    const { ws, callbacks } = await startEngine();
+    ws.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "error",
+          error: { code: "conversation_already_has_active_response" },
+        })
+      )
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(callbacks.escalations).toEqual([]);
+  });
+
+  it("still escalates on other error events", async () => {
+    const { ws, callbacks } = await startEngine();
+    ws.emit(
+      "message",
+      Buffer.from(JSON.stringify({ type: "error", error: { code: "server_error" } }))
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(callbacks.escalations).toEqual(["model_error"]);
+  });
+});
+
 describe("barge-in gating from config", () => {
   it("suppresses onBargeIn when bargeInEnabled is false", async () => {
     resolveEffectiveConfig.mockResolvedValueOnce({
