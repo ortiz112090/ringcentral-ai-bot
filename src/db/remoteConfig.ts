@@ -108,6 +108,13 @@ export interface BotConfigRow {
   web_lead_text_enabled: boolean | null;
   /** IANA timezone for quiet-hours enforcement (default 'America/Los_Angeles'). */
   timezone: string | null;
+  // ---- Bot roles + campaigns (see migration 0010_campaigns.sql) ----
+  /**
+   * Role gate: answer_calls | outbound_calls | answer_and_followup | texting.
+   * Decides which pipelines are active for this tenant; read fresh per event.
+   * Nullable/absent-tolerant so schemas without the column resolve to the default.
+   */
+  bot_role: string | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */

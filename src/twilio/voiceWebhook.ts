@@ -10,6 +10,7 @@ import { logger } from "../logger";
 import { BOT_ID, isBotEnabled, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "./client";
 import { createStreamToken } from "./streamToken";
+import { roleAllows } from "../roles";
 import {
   BotActiveStatus,
   closeCallIfLive,
@@ -107,6 +108,21 @@ function buildFallbackTwiml(escalationNumber: string | undefined): string {
     response.say("Sorry, no one is available to take your call right now. Please call back later.");
     response.hangup();
   }
+  return response.toString();
+}
+
+/**
+ * TwiML for a call to a texting-only bot: politely decline and hang up (never open
+ * a Realtime session or media stream). A texting-role tenant has no voice pipeline,
+ * so any inbound call is out of scope — we say a brief line and end the call rather
+ * than reject silently.
+ */
+export function buildRoleRejectTwiml(): string {
+  const response = new Twiml.VoiceResponse();
+  response.say(
+    "Thanks for calling. This line is for text messages only. Please send us a text and we'll be happy to help."
+  );
+  response.hangup();
   return response.toString();
 }
 
@@ -226,8 +242,21 @@ export async function handleVoiceWebhook(req: Request, res: Response): Promise<R
 
   // 3. Resolve the original caller (handles RC-forwarded calls) and build the
   //    fail-closed TwiML from effective config + kill switch.
-  const { twilio: tw } = await resolveEffectiveConfig();
+  const { twilio: tw, botRole } = await resolveEffectiveConfig();
   const callSid = params.CallSid ?? null;
+
+  // 3a-role. Role gate (fresh per call): a texting-only bot has no voice pipeline —
+  //   politely decline. Every voice role (answer_calls / outbound_calls /
+  //   answer_and_followup) stays reachable so dialed-lead callbacks are answered.
+  if (!roleAllows(botRole, "voice_inbound")) {
+    logger.info("Voice call to a non-voice-role bot; returning polite reject TwiML", {
+      botId: BOT_ID,
+      botRole,
+      callSid,
+    });
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(buildRoleRejectTwiml());
+  }
 
   // 3a. Active-flag gate: FRESH per-call read of bots.active (dashboard toggle +
   //     trash system). A disabled/missing/trashed bot never answers — forward to

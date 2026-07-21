@@ -12,6 +12,7 @@
 // cycle (config -> remoteConfig -> supabase -> config). The runtime helpers are
 // required lazily inside resolveEffectiveConfig() instead.
 import type { BotConfigRow } from "./db/remoteConfig";
+import { normalizeRole, type BotRole } from "./roles";
 import { logger } from "./logger";
 
 /**
@@ -58,6 +59,11 @@ export const config = {
   // (POST /v1/leads/:botId/text-outreach). When unset the endpoint fails closed
   // (503) rather than accept unauthenticated outreach requests.
   textOutreachSecret: optional("TEXT_OUTREACH_SECRET", ""),
+
+  // Shared token guarding the Drop Cowboy RVM status webhook
+  // (POST /webhooks/dropcowboy/status?token=...). When unset the webhook fails
+  // closed (503) rather than trust an unauthenticated delivery callback.
+  dcWebhookToken: optional("DC_WEBHOOK_TOKEN", ""),
 
   // NOTE: RingCentral/OpenAI credentials are read leniently (optional, default "")
   // rather than fail-fast, because they may instead be supplied by Supabase and
@@ -179,6 +185,22 @@ export interface EffectiveConfig {
     /** IANA timezone for quiet-hours (default 'America/Los_Angeles'). */
     timezone: string;
   };
+  /**
+   * Role gate for this tenant (bot_config.bot_role), normalized to a valid BotRole.
+   * All pipeline gating funnels through roleAllows() (see ../roles). Read fresh per
+   * event so a dashboard change applies without a redeploy.
+   */
+  botRole: BotRole;
+  /**
+   * Drop Cowboy ringless-voicemail credentials (api_credentials provider
+   * 'dropcowboy'). DB-first; env fallback (DROPCOWBOY_TEAM_ID/SECRET/BRAND_ID) only
+   * for the primary bot — identical isolation rule to the Twilio credentials.
+   */
+  dropcowboy: {
+    teamId: string | undefined;
+    secret: string | undefined;
+    brandId: string | undefined;
+  };
   realtimeVoice: string;
   /**
    * Realtime output speaking rate, resolved env-first
@@ -294,6 +316,19 @@ export function twilioSmsWebhookUrl(): string {
 }
 
 /**
+ * Callback URL Drop Cowboy POSTs RVM delivery status to, with the shared token as a
+ * query param so the webhook can fail closed on a missing/wrong token. Returns ""
+ * when PUBLIC_BASE_URL is unset so the worker can detect the misconfiguration.
+ */
+export function dropCowboyStatusCallbackUrl(): string {
+  const base = publicBase();
+  if (!base) return "";
+  const token = config.dcWebhookToken.trim();
+  const url = `${base}/webhooks/dropcowboy/status`;
+  return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+}
+
+/**
  * Merge the env-var baseline with the Supabase-loaded config, ENV-FIRST.
  *
  * Reads the last successfully cached remote config (warmed at startup by
@@ -395,6 +430,12 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       webLeadEnabled: botConfig?.web_lead_text_enabled !== false,
       timezone:
         envFirst("BOT_TIMEZONE", botConfig?.timezone) ?? "America/Los_Angeles",
+    },
+    botRole: normalizeRole(envFirst("BOT_ROLE", botConfig?.bot_role)),
+    dropcowboy: {
+      teamId: credentialFirst("DROPCOWBOY_TEAM_ID", getCredential("dropcowboy", "team_id")),
+      secret: credentialFirst("DROPCOWBOY_SECRET", getCredential("dropcowboy", "secret")),
+      brandId: credentialFirst("DROPCOWBOY_BRAND_ID", getCredential("dropcowboy", "brand_id")),
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",

@@ -5,6 +5,8 @@ import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
 import { twilioVoiceRouter } from "./twilio/voiceWebhook";
 import { smsRouter } from "./sms/smsRoutes";
+import { dropcowboyRouter } from "./campaigns/rvmRoutes";
+import { startRvmWorker } from "./campaigns/rvmWorker";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { provisionTextNumber, provisionTwilioNumber } from "./twilio/provisioning";
 import { BOT_ID, getRemoteConfig, loadRemoteConfig } from "./db/remoteConfig";
@@ -22,6 +24,7 @@ async function main(): Promise<void> {
   app.use(webhookRouter);
   app.use(twilioVoiceRouter);
   app.use(smsRouter);
+  app.use(dropcowboyRouter);
 
   // Global error handler so a thrown error in a route never takes down the process.
   app.use(
@@ -88,6 +91,12 @@ async function main(): Promise<void> {
     // unset text_number is a no-op skip. Non-fatal (wraps its own try/catch).
     await provisionTextNumber();
   }
+
+  // Start the Drop Cowboy RVM campaign worker. Always started; it self-gates each
+  // tick on the answer_and_followup role, quiet hours, and credentials (read fresh),
+  // so a role/credential change applies with no redeploy. Never fatal — the tick
+  // swallows its own errors and the interval is unref'd.
+  startRvmWorker();
 
   const shutdown = (signal: string) => {
     logger.info("Shutting down", { signal });

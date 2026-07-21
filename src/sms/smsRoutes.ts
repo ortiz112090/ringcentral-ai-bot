@@ -6,6 +6,7 @@ import { logger } from "../logger";
 import { BOT_ID, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "../twilio/client";
 import { handleInboundSms, sendWebLeadText } from "./smsService";
+import { roleAllows } from "../roles";
 
 /**
  * SMS HTTP endpoints:
@@ -50,7 +51,14 @@ export async function handleSmsWebhook(req: Request, res: Response): Promise<Res
 
   // 2. Refresh tenant config so dashboard edits (text number, kill switch) apply.
   await loadRemoteConfig();
-  const { text } = await resolveEffectiveConfig();
+  const { text, botRole } = await resolveEffectiveConfig();
+
+  // 3-role. Role gate (fresh per message): SMS runs only for the texting role.
+  //   A non-texting bot acknowledges with no reply (never opens the AI path).
+  if (!roleAllows(botRole, "sms")) {
+    logger.info("Inbound SMS ignored: tenant role does not allow SMS", { botId: BOT_ID, botRole });
+    return emptyTwiml(res);
+  }
 
   // 3. Kill switch: text bot disabled → acknowledge with no reply.
   if (!text.enabled) {
@@ -121,6 +129,13 @@ export async function handleTextOutreach(req: Request, res: Response): Promise<R
   const name = typeof bodyObj.name === "string" ? bodyObj.name.trim() : null;
   if (phone === "") {
     return res.status(400).json({ error: "phone_required" });
+  }
+
+  // Role gate: web-lead outreach is part of the SMS pipeline (texting role only).
+  const { botRole } = await resolveEffectiveConfig();
+  if (!roleAllows(botRole, "sms")) {
+    logger.info("Text-outreach rejected: tenant role does not allow SMS", { botId: BOT_ID, botRole });
+    return res.status(403).json({ error: "sms_role_disabled" });
   }
 
   const sent = await sendWebLeadText({ phone, name });

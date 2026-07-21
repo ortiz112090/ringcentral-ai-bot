@@ -1,14 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import twilio from "twilio";
 
-// Deterministic tenant config; `text` is mutated per test (kill switch, number).
+// Deterministic tenant config; `text`/`mockRole` mutated per test.
 const mockText: any = { enabled: true, number: "+15550001111" };
+let mockRole = "texting";
 const mockConfig = { textOutreachSecret: "s3cret" };
 vi.mock("../config", () => ({
   get config() {
     return mockConfig;
   },
-  resolveEffectiveConfig: vi.fn(async () => ({ text: mockText })),
+  resolveEffectiveConfig: vi.fn(async () => ({ text: mockText, botRole: mockRole })),
   twilioSmsWebhookUrl: () => "https://bot.example.com/webhooks/twilio/sms",
 }));
 vi.mock("../db/remoteConfig", () => ({
@@ -74,6 +75,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockText.enabled = true;
   mockText.number = "+15550001111";
+  mockRole = "texting";
   mockConfig.textOutreachSecret = "s3cret";
 });
 
@@ -103,6 +105,15 @@ describe("handleSmsWebhook", () => {
       fakeReq({ headers: { "X-Twilio-Signature": "ok" }, body: { ...validSmsParams, To: "+15559999999" } }),
       res
     );
+    expect(res.statusCode).toBe(200);
+    expect(handleInboundSms).not.toHaveBeenCalled();
+  });
+
+  it("non-texting role → empty TwiML, no service call (role gate)", async () => {
+    vi.spyOn(twilio, "validateRequest").mockReturnValue(true);
+    mockRole = "answer_calls";
+    const res = fakeRes();
+    await handleSmsWebhook(fakeReq({ headers: { "X-Twilio-Signature": "ok" }, body: validSmsParams }), res);
     expect(res.statusCode).toBe(200);
     expect(handleInboundSms).not.toHaveBeenCalled();
   });
@@ -160,6 +171,17 @@ describe("handleTextOutreach (shared-secret auth)", () => {
     const res = fakeRes();
     await handleTextOutreach(fakeReq({ headers: auth, body: {}, params: botParams }), res);
     expect(res.statusCode).toBe(400);
+    expect(sendWebLeadText).not.toHaveBeenCalled();
+  });
+
+  it("403 when the tenant role does not allow SMS", async () => {
+    mockRole = "answer_calls";
+    const res = fakeRes();
+    await handleTextOutreach(
+      fakeReq({ headers: auth, body: { phone: "+15557778888" }, params: botParams }),
+      res
+    );
+    expect(res.statusCode).toBe(403);
     expect(sendWebLeadText).not.toHaveBeenCalled();
   });
 
