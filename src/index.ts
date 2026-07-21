@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
 import { twilioVoiceRouter } from "./twilio/voiceWebhook";
+import { smsRouter } from "./sms/smsRoutes";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { provisionTwilioNumber } from "./twilio/provisioning";
 import { BOT_ID, getRemoteConfig, loadRemoteConfig } from "./db/remoteConfig";
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
   app.use(healthRouter);
   app.use(webhookRouter);
   app.use(twilioVoiceRouter);
+  app.use(smsRouter);
 
   // Global error handler so a thrown error in a route never takes down the process.
   app.use(
