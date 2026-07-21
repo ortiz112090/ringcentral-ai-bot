@@ -54,6 +54,11 @@ export const config = {
   port: parseInt(optional("PORT", "3000"), 10),
   publicBaseUrl: optional("PUBLIC_BASE_URL", ""),
 
+  // Shared secret guarding the authenticated web-lead text-outreach endpoint
+  // (POST /v1/leads/:botId/text-outreach). When unset the endpoint fails closed
+  // (503) rather than accept unauthenticated outreach requests.
+  textOutreachSecret: optional("TEXT_OUTREACH_SECRET", ""),
+
   // NOTE: RingCentral/OpenAI credentials are read leniently (optional, default "")
   // rather than fail-fast, because they may instead be supplied by Supabase and
   // merged env-first in resolveEffectiveConfig(). Only SUPABASE_URL and
@@ -152,6 +157,27 @@ export interface EffectiveConfig {
   business: {
     agentName: string;
     brokerageName: string;
+  };
+  /**
+   * SMS texting-bot settings, resolved from bot_config (env fallback only for the
+   * primary bot on the model default). All per-tenant; the SMS path reads these
+   * fresh each message so dashboard edits apply without a redeploy.
+   */
+  text: {
+    /** Master kill switch; only an explicit true enables the SMS bot. */
+    enabled: boolean;
+    /** Dedicated Twilio SMS number (E.164) this bot texts from / receives on. */
+    number: string | undefined;
+    /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
+    model: string;
+    /** Business name for SMS identification; falls back to agentName. */
+    businessName: string;
+    /** Sub-toggle: missed-call follow-up texts (default true). */
+    missedCallEnabled: boolean;
+    /** Sub-toggle: web-lead outreach endpoint (default true). */
+    webLeadEnabled: boolean;
+    /** IANA timezone for quiet-hours (default 'America/Los_Angeles'). */
+    timezone: string;
   };
   realtimeVoice: string;
   /**
@@ -258,6 +284,16 @@ export function twilioStatusCallbackUrl(): string {
 }
 
 /**
+ * Public URL Twilio POSTs inbound SMS params to (the SMS webhook), used for
+ * X-Twilio-Signature validation and for pointing the texting number's messaging
+ * webhook at us. Returns "" when PUBLIC_BASE_URL is unset.
+ */
+export function twilioSmsWebhookUrl(): string {
+  const base = publicBase();
+  return base ? `${base}/webhooks/twilio/sms` : "";
+}
+
+/**
  * Merge the env-var baseline with the Supabase-loaded config, ENV-FIRST.
  *
  * Reads the last successfully cached remote config (warmed at startup by
@@ -340,6 +376,25 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
     business: {
       agentName: credentialFirst("AGENT_NAME", botConfig?.agent_name) ?? "Alex",
       brokerageName: credentialFirst("BROKERAGE_NAME", botConfig?.brokerage_name) ?? "our brokerage",
+    },
+    text: {
+      // Only an explicit true enables the SMS bot (mirrors the voice kill switch).
+      enabled: botConfig?.text_enabled === true,
+      // Non-secret per-tenant column; env-first like the voice number.
+      number: envFirst("TWILIO_SMS_NUMBER", botConfig?.text_number),
+      model:
+        envFirst("OPENAI_TEXT_MODEL", botConfig?.text_model) ?? "gpt-4o-mini",
+      businessName:
+        (botConfig?.business_name && botConfig.business_name.trim() !== ""
+          ? botConfig.business_name.trim()
+          : undefined) ??
+        credentialFirst("AGENT_NAME", botConfig?.agent_name) ??
+        "Alex",
+      // Sub-toggles default ON: only an explicit false disables them.
+      missedCallEnabled: botConfig?.missed_call_text_enabled !== false,
+      webLeadEnabled: botConfig?.web_lead_text_enabled !== false,
+      timezone:
+        envFirst("BOT_TIMEZONE", botConfig?.timezone) ?? "America/Los_Angeles",
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",

@@ -93,6 +93,21 @@ export interface BotConfigRow {
    * older schemas without this column resolve to the 1.0 default.
    */
   voice_speed: number | null;
+  // ---- SMS texting bot (see migration 0009_texting_bot.sql) ----
+  /** Master kill switch for the SMS bot; dashboard is source of truth, read fresh per message. */
+  text_enabled: boolean | null;
+  /** Dedicated Twilio SMS number for this bot (E.164), separate from the voice number. */
+  text_number: string | null;
+  /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
+  text_model: string | null;
+  /** Business name used in SMS identification (falls back to agent_name). */
+  business_name: string | null;
+  /** Sub-toggle: send a follow-up text after a call the bot didn't serve. */
+  missed_call_text_enabled: boolean | null;
+  /** Sub-toggle: allow the authenticated web-lead outreach endpoint to text. */
+  web_lead_text_enabled: boolean | null;
+  /** IANA timezone for quiet-hours enforcement (default 'America/Los_Angeles'). */
+  timezone: string | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */

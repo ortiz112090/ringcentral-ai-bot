@@ -186,7 +186,38 @@ export async function wrapUpCall(state: CallState, outcome: CallOutcome): Promis
     ended_at: endedAt,
     captured_data: state.capturedData,
   });
+
+  // Missed-caller follow-up (SMS trigger 2): when a call ends UNSERVED — the caller
+  // hung up before a quote, or we couldn't serve them — hand the lead to the SMS
+  // bot. Served (closed_*) and human-handled (escalated) outcomes never text. The
+  // SMS module is DYNAMICALLY imported only on a qualifying outcome, so the voice
+  // path (and its tests) never load the SMS code for escalated/closed calls. The
+  // trigger itself enforces the text kill switch, sub-toggle, opt-out, and quiet
+  // hours, so this is a safe fire-and-forget.
+  if (state.callerNumber && MISSED_CALL_OUTCOMES.has(outcome)) {
+    const phone = state.callerNumber;
+    const callId = state.callId;
+    void import("./sms/smsService")
+      .then(({ sendMissedCallText }) => sendMissedCallText({ phone }))
+      .catch((err) => {
+        logger.error("Missed-call SMS trigger failed", {
+          callId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }
 }
+
+/**
+ * Call outcomes that mean the caller was NOT served and should get a follow-up
+ * text. Deliberately excludes closed_pif/closed_installment (already sold) and
+ * escalated (a human is taking over).
+ */
+const MISSED_CALL_OUTCOMES = new Set<CallOutcome>([
+  "no_answer",
+  "abandoned",
+  "follow_up_needed",
+]);
 
 /** JSON body POSTed to a configured webhook lead-destination on call finalize. */
 export interface LeadWebhookPayload {
