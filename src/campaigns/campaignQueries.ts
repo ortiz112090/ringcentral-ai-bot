@@ -150,6 +150,57 @@ export async function setContactStatus(
   }
 }
 
+/**
+ * Finalize an outbound-call contact from the Twilio status callback: set its
+ * terminal status + outcome, stamp attempted_at, and record the Twilio Call SID in
+ * data.call_sid (merged, so any CSV-provided data is preserved). This is the
+ * outbound-calling analogue of setContactStatus but additionally persists the SID so
+ * the dialed contact links back to its Twilio call. Failure-tolerant.
+ */
+export async function setContactCallOutcome(
+  contactId: number,
+  status: ContactStatus,
+  outcome: string,
+  callSid: string | null
+): Promise<void> {
+  // Read-modify-write the jsonb data column so we merge the SID without dropping any
+  // dashboard/CSV-provided fields. A read error just means we skip the SID merge.
+  let data: Record<string, unknown> | undefined;
+  if (callSid) {
+    const { data: row, error: readErr } = await supabase
+      .from("campaign_contacts")
+      .select("data")
+      .eq("bot_id", BOT_ID)
+      .eq("id", contactId)
+      .maybeSingle();
+    if (readErr) {
+      logger.warn("Failed to read contact data before call-outcome write", {
+        contactId,
+        error: readErr.message,
+      });
+    } else {
+      const current = (row?.data as Record<string, unknown> | null) ?? {};
+      data = { ...current, call_sid: callSid };
+    }
+  }
+
+  const patch: Record<string, unknown> = {
+    status,
+    outcome: truncateOutcome(outcome),
+    attempted_at: new Date().toISOString(),
+  };
+  if (data !== undefined) patch.data = data;
+
+  const { error } = await supabase
+    .from("campaign_contacts")
+    .update(patch)
+    .eq("bot_id", BOT_ID)
+    .eq("id", contactId);
+  if (error) {
+    logger.error("Failed to set contact call outcome", { contactId, status, error: error.message });
+  }
+}
+
 /** Mark a campaign completed (no pending contacts remain). Failure-tolerant. */
 export async function completeCampaign(campaignId: string): Promise<void> {
   const { error } = await supabase

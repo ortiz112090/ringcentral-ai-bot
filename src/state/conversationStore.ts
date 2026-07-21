@@ -19,6 +19,12 @@ export interface CallState {
   startedAt: string;
   /** Accumulated lead answers captured this call (mirrors calls.captured_data). */
   capturedData: Record<string, unknown>;
+  /**
+   * True for a call the campaign dialer PLACED (outbound); false for a call the bot
+   * answered (inbound). Drives the Realtime prompt framing ("person you are calling"
+   * vs "inbound caller") — the bot already speaks first on every call.
+   */
+  outbound: boolean;
 }
 
 const store = new Map<string, CallState>();
@@ -26,7 +32,8 @@ const store = new Map<string, CallState>();
 export function createCallState(
   callId: string,
   callerNumber: string | null,
-  lead: LeadRecord | null
+  lead: LeadRecord | null,
+  outbound = false
 ): CallState {
   const state: CallState = {
     callId,
@@ -38,6 +45,7 @@ export function createCallState(
     closeAttempts: 0,
     startedAt: new Date().toISOString(),
     capturedData: {},
+    outbound,
   };
   store.set(callId, state);
   return state;

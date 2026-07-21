@@ -109,6 +109,7 @@ function makeState(): CallState {
     closeAttempts: 0,
     startedAt: new Date().toISOString(),
     capturedData: {},
+    outbound: false,
   } as CallState;
 }
 
@@ -858,6 +859,6 @@ describe("session setup loads and passes the DB script", () => {
     const { state } = await startEngine();
 
     const buildMock = vi.mocked(buildRealtimeInstructions);
-    expect(buildMock).toHaveBeenCalledWith(state.lead, [], stages, constraints);
+    expect(buildMock).toHaveBeenCalledWith(state.lead, [], stages, constraints, false);
   });
 });

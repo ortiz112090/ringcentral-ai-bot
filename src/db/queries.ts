@@ -57,18 +57,25 @@ export async function fetchBotActiveStatus(
  * clobbers an already-in-progress row (its transcript/started_at are preserved).
  */
 export async function createCallRecord(record: CallRecord): Promise<void> {
-  const { error } = await supabase.from("calls").upsert(
-    {
-      bot_id: BOT_ID,
-      call_id: record.call_id,
-      caller_number: record.caller_number,
-      started_at: record.started_at,
-      ended_at: null,
-      transcript: record.transcript ?? [],
-      realtime_session_id: record.realtime_session_id ?? null,
-    },
-    { onConflict: "call_id", ignoreDuplicates: true }
-  );
+  const row: Record<string, unknown> = {
+    bot_id: BOT_ID,
+    call_id: record.call_id,
+    caller_number: record.caller_number,
+    started_at: record.started_at,
+    ended_at: null,
+    transcript: record.transcript ?? [],
+    realtime_session_id: record.realtime_session_id ?? null,
+  };
+  // Outbound calls set these on the phase-1 insert so the row links to the dialed
+  // contact; inbound calls omit them and rely on the calls.direction column default
+  // ('inbound'). Written only when provided so the ignoreDuplicates upsert on an
+  // existing inbound row never flips its direction.
+  if (record.direction) row.direction = record.direction;
+  if (record.campaign_contact_id != null) row.campaign_contact_id = record.campaign_contact_id;
+  const { error } = await supabase.from("calls").upsert(row, {
+    onConflict: "call_id",
+    ignoreDuplicates: true,
+  });
   if (error) {
     logger.error("Failed to create call record", { callId: record.call_id, error: error.message });
   }

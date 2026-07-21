@@ -37,6 +37,12 @@ export interface CallRecord {
   transcript?: TranscriptTurn[] | null;
   // OpenAI Realtime API session id for live speech-to-speech calls (see 0003 migration).
   realtime_session_id?: string | null;
+  // 'inbound' (bot answered) | 'outbound' (campaign dialer placed it). Omitted →
+  // the calls.direction column default ('inbound'). See 0011 migration.
+  direction?: "inbound" | "outbound";
+  // For outbound campaign calls, the campaign_contacts row that was dialed; null/
+  // omitted for inbound. See 0011 migration.
+  campaign_contact_id?: number | null;
 }
 
 export interface LeadRecord {
