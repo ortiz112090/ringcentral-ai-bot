@@ -17,6 +17,7 @@ import {
   createCallRecord,
   fetchBotActiveStatus,
 } from "../db/queries";
+import { isOutboundCall } from "../campaigns/outboundState";
 
 /**
  * Twilio inbound-call webhook (POST /webhooks/twilio/voice) + status callback
@@ -337,6 +338,23 @@ export async function handleStatusCallback(req: Request, res: Response): Promise
     logger.info("Twilio status callback: closing call row if still live", { callSid, callStatus });
     const outcome = callStatus === "completed" ? "abandoned" : "no_answer";
     await closeCallIfLive(callSid, outcome);
+
+    // Outbound campaign calls also finalize their campaign_contacts row from this
+    // terminal status (the callback is the only place the CallSid maps back to the
+    // dialed contact). isOutboundCall is a cheap in-memory check (leaf module, no
+    // Supabase); the heavier finalize path is dynamically imported ONLY for a
+    // tracked outbound call, so the inbound path never loads the campaign/DB code.
+    if (isOutboundCall(callSid)) {
+      try {
+        const { finalizeOutboundCall } = await import("../campaigns/outboundWorker");
+        await finalizeOutboundCall(callSid, callStatus);
+      } catch (err) {
+        logger.error("Failed to finalize outbound contact from status callback", {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
   return res.status(204).send();
 }

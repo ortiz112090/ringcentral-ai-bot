@@ -374,7 +374,8 @@ export class RealtimeEngine {
           this.state.lead,
           lessons,
           this.scriptStages,
-          this.scriptConstraints
+          this.scriptConstraints,
+          this.state.outbound
         ),
         audio: {
           input: {

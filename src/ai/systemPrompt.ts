@@ -299,7 +299,8 @@ export function buildRealtimeInstructions(
   lead: LeadRecord | null,
   lessons: LearnedRule[] = [],
   stages: ScriptStageRow[] = [],
-  constraints: ScriptConstraintRow[] = []
+  constraints: ScriptConstraintRow[] = [],
+  outbound = false
 ): string {
   const activeStages = (stages ?? []).filter((s) => !!s && !!s.stage_type);
 
@@ -330,7 +331,14 @@ export function buildRealtimeInstructions(
 
   const constraintRules = renderConstraintRules(constraints ?? [], 9);
 
-  return `You are ${agentName}, a friendly, confident licensed auto-insurance agent at ${brokerage}, on a LIVE PHONE CALL with an inbound caller who was recently on the website trying to file an SR22. Run the SR22 follow-up sales script below to close the deal or escalate to a human. Speak naturally, warmly, and BRIEFLY — one or two sentences per turn, like a real phone call. Never read lists or say anything robotic.
+  // Outbound campaign calls: WE dialed the lead, so frame it as an outbound
+  // follow-up and remind the model it speaks first (open with the opener line).
+  // Inbound calls keep the original "caller reached us" framing.
+  const framing = outbound
+    ? `on a LIVE OUTBOUND PHONE CALL you just placed to a lead who was recently on the website trying to file an SR22. They just picked up and haven't said anything yet, so YOU speak first — open with the opener line`
+    : `on a LIVE PHONE CALL with an inbound caller who was recently on the website trying to file an SR22`;
+
+  return `You are ${agentName}, a friendly, confident licensed auto-insurance agent at ${brokerage}, ${framing}. Run the SR22 follow-up sales script below to close the deal or escalate to a human. Speak naturally, warmly, and BRIEFLY — one or two sentences per turn, like a real phone call. Never read lists or say anything robotic.
 
 ${knownLead}
 

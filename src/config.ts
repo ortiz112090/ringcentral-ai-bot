@@ -306,6 +306,20 @@ export function twilioStatusCallbackUrl(): string {
 }
 
 /**
+ * Public URL Twilio requests for TwiML when an OUTBOUND campaign call connects
+ * (the `url` on calls.create). The dialed contact's id rides as a ?contactId query
+ * param so the webhook can link the call back to its campaign_contact. The full URL
+ * (with query string) is also what Twilio signs, so signature validation must use
+ * this exact string. Returns "" when PUBLIC_BASE_URL is unset so the worker can
+ * detect the misconfiguration and skip dialing.
+ */
+export function twilioVoiceOutboundWebhookUrl(contactId: number | string): string {
+  const base = publicBase();
+  if (!base) return "";
+  return `${base}/webhooks/twilio/voice-outbound?contactId=${encodeURIComponent(String(contactId))}`;
+}
+
+/**
  * Public URL Twilio POSTs inbound SMS params to (the SMS webhook), used for
  * X-Twilio-Signature validation and for pointing the texting number's messaging
  * webhook at us. Returns "" when PUBLIC_BASE_URL is unset.

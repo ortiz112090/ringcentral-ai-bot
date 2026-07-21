@@ -20,6 +20,7 @@ import {
   recordCallerTurn,
 } from "./state/conversationStore";
 import { CallOutcome } from "./db/types";
+import { getOutboundCall } from "./campaigns/outboundState";
 
 /**
  * Orchestrates a single call: initializes state on answer, processes each caller
@@ -48,15 +49,26 @@ export async function onCallStarted(
   callId: string,
   callerNumber: string | null
 ): Promise<CallState> {
+  // An outbound campaign call is registered by the dialer (keyed by CallSid) before
+  // its media stream connects, so a live registry entry here means this is a call we
+  // PLACED. Drives the outbound prompt framing + the calls.direction/contact link.
+  const outboundCall = getOutboundCall(callId);
+  const outbound = Boolean(outboundCall);
   const lead = callerNumber ? await findLeadByPhone(callerNumber) : null;
-  const state = createCallState(callId, callerNumber, lead);
+  const state = createCallState(callId, callerNumber, lead, outbound);
+  // Idempotent upsert (ignoreDuplicates on call_id): for outbound calls the webhook
+  // already inserted the row with direction/contact set — this is then a no-op; the
+  // direction/campaign_contact_id here are the backstop if that insert was missed.
   await createCallRecord({
     call_id: callId,
     caller_number: callerNumber,
     started_at: state.startedAt,
     transcript: [],
+    ...(outbound
+      ? { direction: "outbound", campaign_contact_id: outboundCall!.contactId }
+      : {}),
   });
-  logger.info("Call started", { callId, callerNumber, knownLead: Boolean(lead) });
+  logger.info("Call started", { callId, callerNumber, knownLead: Boolean(lead), outbound });
   return state;
 }
 
