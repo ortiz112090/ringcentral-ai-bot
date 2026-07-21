@@ -6,7 +6,7 @@ import { webhookRouter } from "./routes/webhooks";
 import { twilioVoiceRouter } from "./twilio/voiceWebhook";
 import { smsRouter } from "./sms/smsRoutes";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
-import { provisionTwilioNumber } from "./twilio/provisioning";
+import { provisionTextNumber, provisionTwilioNumber } from "./twilio/provisioning";
 import { BOT_ID, getRemoteConfig, loadRemoteConfig } from "./db/remoteConfig";
 import { closeStaleLiveCalls } from "./db/queries";
 
@@ -84,6 +84,9 @@ async function main(): Promise<void> {
   } else {
     // Non-fatal by contract (provisionTwilioNumber wraps its own try/catch).
     await provisionTwilioNumber();
+    // Also point the tenant's SMS number at our messaging webhook. Opt-in: an
+    // unset text_number is a no-op skip. Non-fatal (wraps its own try/catch).
+    await provisionTextNumber();
   }
 
   const shutdown = (signal: string) => {
