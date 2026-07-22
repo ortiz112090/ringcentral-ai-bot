@@ -103,6 +103,9 @@ function secretsMatch(provided: string, expected: string): boolean {
 }
 
 export async function handleTextOutreach(req: Request, res: Response): Promise<Response> {
+  // Refresh tenant config so dashboard edits (text_enabled, kill switch) apply to
+  // test/web-lead sends immediately, not on the next unrelated refresh.
+  await loadRemoteConfig();
   // Auth: shared-secret header. Fail closed when no secret is configured so the
   // endpoint is never open to unauthenticated outreach.
   const expected = config.textOutreachSecret.trim();
