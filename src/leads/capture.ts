@@ -23,6 +23,9 @@ export const LEADS_TABLE_KEYS = [
   "quote_amount_pif",
   "quote_amount_monthly",
   "carrier",
+  "address",
+  "email",
+  "start_timeline",
 ] as const;
 
 /**
@@ -132,6 +135,41 @@ function isAddressField(field: LeadFieldRow | undefined, key: string): boolean {
 /** True for a person-name field (first_name / last_name), by key or label. */
 function isNameField(field: LeadFieldRow | undefined, key: string): boolean {
   return key === "first_name" || key === "last_name" || labelOf(field).includes("name");
+}
+
+/** True for the contact email field, by key or label. */
+function isEmailField(field: LeadFieldRow | undefined, key: string): boolean {
+  return key === "email" || labelOf(field).includes("email");
+}
+
+/** True for the start-timeline field ("how soon do you need this active/filed"). */
+function isStartTimelineField(field: LeadFieldRow | undefined, key: string): boolean {
+  if (key === "start_timeline") return true;
+  const label = labelOf(field);
+  return label.includes("timeline") || (label.includes("start") && label.includes("time"));
+}
+
+/**
+ * Validate a contact email: trim + lowercase, then require a basic email shape
+ * (local@domain.tld with no whitespace). Returns the normalized lowercase value.
+ */
+function validateEmail(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const normalized = String(value).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    return { ok: false, reason: "invalid email address" };
+  }
+  return { ok: true, value: normalized };
+}
+
+/** Validate a start timeline: free text, non-empty after trim. */
+function validateStartTimeline(
+  value: unknown
+): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const raw = String(value).trim();
+  if (raw === "") return { ok: false, reason: "start timeline is required" };
+  return { ok: true, value: raw };
 }
 
 /**
@@ -316,7 +354,9 @@ function validateOne(
   // license_number so the "license" + "state" label can't fall into the number rule.
   if (isLicenseStateField(field, key)) return validateLicenseState(value);
   if (isLicenseNumberField(field, key)) return validateLicenseNumber(value);
+  if (isEmailField(field, key)) return validateEmail(value);
   if (isAddressField(field, key)) return validateAddress(value);
+  if (isStartTimelineField(field, key)) return validateStartTimeline(value);
   if (isNameField(field, key)) return validateName(value);
 
   const type = field?.field_type ?? "text";
@@ -417,6 +457,9 @@ export function buildLeadColumnUpdates(valid: Record<string, unknown>): LeadColu
     quote_amount_pif: num(valid.quote_amount_pif),
     quote_amount_monthly: num(valid.quote_amount_monthly),
     carrier,
+    address: str(valid.address),
+    email: str(valid.email),
+    start_timeline: str(valid.start_timeline),
   };
   return { updates, hasLeadColumns };
 }

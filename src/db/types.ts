@@ -58,6 +58,12 @@ export interface LeadRecord {
   quote_amount_pif?: number | null;
   quote_amount_monthly?: number | null;
   carrier?: Carrier | null;
+  // Full home mailing address (free text). See 0018 migration.
+  address?: string | null;
+  // Contact email, normalized lowercase/trimmed. See 0018 migration.
+  email?: string | null;
+  // How soon the lead needs the SR22 active/filed (free text). See 0018 migration.
+  start_timeline?: string | null;
   status?: LeadStatus | null;
   last_contacted_at?: string | null;
 }

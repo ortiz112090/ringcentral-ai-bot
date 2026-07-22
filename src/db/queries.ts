@@ -433,6 +433,9 @@ export async function upsertLead(lead: LeadRecord): Promise<void> {
     "quote_amount_pif",
     "quote_amount_monthly",
     "carrier",
+    "address",
+    "email",
+    "start_timeline",
     "status",
   ];
   for (const key of optionalKeys) {

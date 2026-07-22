@@ -83,6 +83,7 @@ import {
   getScriptConstraints,
   mergeCapturedData,
   getWebhookDestination,
+  upsertLead,
 } from "./queries";
 
 const BOT_ID = "00000000-0000-0000-0000-000000000001";
@@ -297,5 +298,25 @@ describe("getWebhookDestination", () => {
   it("returns null on query error", async () => {
     results.push({ data: null, error: { message: "boom" } });
     expect(await getWebhookDestination(BOT_ID)).toBeNull();
+  });
+});
+
+describe("upsertLead persists the contact columns", () => {
+  it("includes address, email, and start_timeline in the upsert payload", async () => {
+    results.push({ data: null, error: null });
+
+    await upsertLead({
+      phone_number: "+15551112222",
+      address: "123 Main St, Springfield, 90210",
+      email: "sam@example.com",
+      start_timeline: "this week",
+    });
+
+    const [c] = calls;
+    expect(c.op).toBe("upsert");
+    expect(c.payload.address).toBe("123 Main St, Springfield, 90210");
+    expect(c.payload.email).toBe("sam@example.com");
+    expect(c.payload.start_timeline).toBe("this week");
+    expect(c.payload.phone_number).toBe("+15551112222");
   });
 });
