@@ -359,6 +359,25 @@ export function ringcentralSmsWebhookUrl(): string {
 }
 
 /**
+ * Base URL the "Sign in with RingCentral" OAuth flow builds its redirect_uri from.
+ * Reuses PUBLIC_BASE_URL (the same base the RC webhook address uses); when unset,
+ * falls back to the deployed service URL so sign-in still works out of the box.
+ */
+const RC_OAUTH_BASE_FALLBACK = "https://ringcentral-ai-bot.onrender.com";
+export function rcOAuthBaseUrl(): string {
+  return publicBase() || RC_OAUTH_BASE_FALLBACK;
+}
+
+/**
+ * The OAuth redirect_uri RingCentral sends the authorization code back to. MUST be
+ * byte-identical on the /authorize request and the token exchange, so both derive
+ * it from this one function.
+ */
+export function rcOAuthCallbackUrl(): string {
+  return `${rcOAuthBaseUrl()}/rc/oauth/callback`;
+}
+
+/**
  * Callback URL Drop Cowboy POSTs RVM delivery status to, with the shared token as a
  * query param so the webhook can fail closed on a missing/wrong token. Returns ""
  * when PUBLIC_BASE_URL is unset so the worker can detect the misconfiguration.
