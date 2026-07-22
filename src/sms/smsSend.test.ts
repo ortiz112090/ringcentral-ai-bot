@@ -9,6 +9,10 @@ const messagesCreate = vi.fn(async () => ({ sid: "SM1" }));
 vi.mock("../twilio/client", () => ({
   getTwilioClient: vi.fn(async () => ({ messages: { create: (...a: any[]) => messagesCreate(...a) } })),
 }));
+// Mock the RC sender so this Twilio-path test never loads the RingCentral client
+// chain (which would pull remoteConfig → supabase → config). These cases only
+// exercise the Twilio channel (conversation.channel is undefined/'twilio').
+vi.mock("./rcSms", () => ({ sendRcSms: vi.fn(async () => ({ sent: true })) }));
 const isPhoneOptedOut = vi.fn(async () => false);
 const insertTextMessage = vi.fn(async () => {});
 vi.mock("./smsQueries", () => ({

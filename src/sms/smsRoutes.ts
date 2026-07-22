@@ -142,5 +142,149 @@ export async function handleTextOutreach(req: Request, res: Response): Promise<R
   return res.status(202).json({ accepted: true, sent });
 }
 
+/**
+ * Small fixed-size LRU of recently-seen RingCentral message ids, the fast first
+ * line of inbound dedupe (the durable second line is the provider_message_id check
+ * in handleInboundSms). RC can redeliver the same message-store event (e.g. on a
+ * slow ack); this keeps us from double-processing within a single process without a
+ * DB round-trip. Bounded so it can never grow unboundedly.
+ */
+const RC_DEDUPE_MAX = 500;
+const rcSeenMessageIds = new Set<string>();
+
+/** Record an id in the LRU; returns true if it was ALREADY present (a duplicate). */
+function rcMessageSeen(id: string): boolean {
+  if (rcSeenMessageIds.has(id)) return true;
+  rcSeenMessageIds.add(id);
+  if (rcSeenMessageIds.size > RC_DEDUPE_MAX) {
+    // Evict the oldest (insertion-ordered) entry.
+    const oldest = rcSeenMessageIds.values().next().value;
+    if (oldest !== undefined) rcSeenMessageIds.delete(oldest);
+  }
+  return false;
+}
+
+/** Test-only: clear the in-memory RC dedupe LRU between cases. */
+export function __resetRcDedupeForTests(): void {
+  rcSeenMessageIds.clear();
+}
+
+/**
+ * RingCentral inbound-SMS webhook — the RC doorway into the SAME SMS pipeline as the
+ * Twilio webhook (handleInboundSms). Steps:
+ *   1. Subscription validation handshake: if a `Validation-Token` header is present,
+ *      echo it back in the response header with 200 immediately (no processing).
+ *   2. Fail-closed auth: require the `Verification-Token` header to equal env
+ *      RC_SMS_WEBHOOK_TOKEN. Missing config → 503; wrong/missing token → 403.
+ *   3. Parse the message-store instant event; only Inbound SMS is processed.
+ *   4. Role gate + kill switch + destination match (fail closed) + dedupe, then hand
+ *      off to handleInboundSms on the 'ringcentral' channel.
+ * Always acknowledges 200 to RC after auth so a processing hiccup never trips RC's
+ * delivery-failure blacklisting; handleInboundSms is failure-tolerant.
+ */
+export async function handleRcSmsWebhook(req: Request, res: Response): Promise<Response> {
+  // 1. Subscription validation handshake — echo the token, do nothing else.
+  const validationToken = req.header("Validation-Token");
+  if (validationToken) {
+    res.set("Validation-Token", validationToken);
+    return res.status(200).send();
+  }
+
+  // 2. Fail-closed verification-token auth.
+  const expected = config.rcSmsWebhookToken.trim();
+  if (expected === "") {
+    logger.error("RingCentral SMS webhook hit but RC_SMS_WEBHOOK_TOKEN is unset; refusing");
+    return res.status(503).send("rc_sms_not_configured");
+  }
+  const provided = (req.header("Verification-Token") ?? "").trim();
+  if (!provided || !secretsMatch(provided, expected)) {
+    logger.warn("Rejected RingCentral SMS webhook: bad or missing verification token");
+    return res.status(403).send("invalid verification token");
+  }
+
+  // 3. Parse the message-store instant event. body.body carries the message.
+  const messageBody = (req.body ?? {}).body as
+    | {
+        id?: unknown;
+        direction?: unknown;
+        from?: { phoneNumber?: unknown };
+        to?: Array<{ phoneNumber?: unknown }>;
+        subject?: unknown;
+      }
+    | undefined;
+  if (!messageBody || messageBody.direction !== "Inbound") {
+    // Non-inbound (e.g. our own outbound echo) or a non-message event: ack + ignore.
+    return res.status(200).send();
+  }
+
+  const from = typeof messageBody.from?.phoneNumber === "string" ? messageBody.from.phoneNumber.trim() : "";
+  const text = typeof messageBody.subject === "string" ? messageBody.subject : "";
+  const messageId = messageBody.id != null ? String(messageBody.id) : "";
+  if (!from) {
+    logger.warn("Inbound RC SMS ignored: missing from.phoneNumber");
+    return res.status(200).send();
+  }
+
+  // Fast in-memory dedupe before any DB/engine work.
+  if (messageId && rcMessageSeen(messageId)) {
+    logger.info("Inbound RC SMS skipped: duplicate message id (in-memory LRU)", { messageId });
+    return res.status(200).send();
+  }
+
+  // 4. Refresh tenant config so dashboard edits (rc_sms_number, kill switch) apply.
+  await loadRemoteConfig();
+  const { text: textCfg, botRole } = await resolveEffectiveConfig();
+
+  // Role gate (fresh per message): SMS runs only for the texting role.
+  if (!roleAllows(botRole, "sms")) {
+    logger.info("Inbound RC SMS ignored: tenant role does not allow SMS", { botId: BOT_ID, botRole });
+    return res.status(200).send();
+  }
+
+  // Kill switch: text bot disabled → acknowledge with no reply.
+  if (!textCfg.enabled) {
+    logger.info("Inbound RC SMS ignored: text bot disabled for tenant", { botId: BOT_ID });
+    return res.status(200).send();
+  }
+
+  // Destination match (fail closed): the message must be addressed to THIS tenant's
+  // rc_sms_number. An unset rc_sms_number means RC texting is off → refuse.
+  if (!textCfg.rcSmsNumber || !rcDestinationMatches(messageBody.to, textCfg.rcSmsNumber)) {
+    logger.warn("Inbound RC SMS ignored: destination does not match this tenant's rc_sms_number", {
+      botId: BOT_ID,
+      hasRcSmsNumber: Boolean(textCfg.rcSmsNumber),
+    });
+    return res.status(200).send();
+  }
+
+  try {
+    await handleInboundSms({
+      from,
+      body: text,
+      channel: "ringcentral",
+      providerMessageId: messageId || null,
+    });
+  } catch (err) {
+    logger.error("handleInboundSms threw unexpectedly (RingCentral channel)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return res.status(200).send();
+}
+
+/** True when one of the RC `to[]` numbers matches this tenant's rc_sms_number. */
+function rcDestinationMatches(
+  to: Array<{ phoneNumber?: unknown }> | undefined,
+  rcSmsNumber: string
+): boolean {
+  const target = normalizePhoneNumber(rcSmsNumber);
+  if (!target) return false;
+  const entries = Array.isArray(to) ? to : [];
+  return entries.some(
+    (t) => normalizePhoneNumber(typeof t?.phoneNumber === "string" ? t.phoneNumber : "") === target
+  );
+}
+
 smsRouter.post("/webhooks/twilio/sms", handleSmsWebhook);
+smsRouter.post("/webhooks/ringcentral/sms", handleRcSmsWebhook);
 smsRouter.post("/v1/leads/:botId/text-outreach", handleTextOutreach);

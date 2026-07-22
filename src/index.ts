@@ -11,6 +11,7 @@ import { outboundVoiceRouter } from "./campaigns/outboundRoutes";
 import { startOutboundWorker } from "./campaigns/outboundWorker";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { provisionTextNumber, provisionTwilioNumber } from "./twilio/provisioning";
+import { startRcSmsProvisioning } from "./sms/rcProvisioning";
 import { BOT_ID, getRemoteConfig, loadRemoteConfig } from "./db/remoteConfig";
 import { closeStaleLiveCalls } from "./db/queries";
 
@@ -107,6 +108,11 @@ async function main(): Promise<void> {
   // redeploy. Never fatal — the tick swallows its own errors and the interval is
   // unref'd.
   startOutboundWorker();
+
+  // Ensure this tenant's RingCentral SMS webhook subscription exists and stays
+  // renewed (hourly poller). Self-gates on the texting role, rc_sms_number, and
+  // RC_SMS_WEBHOOK_TOKEN (read fresh); never fatal (wraps its own try/catch).
+  startRcSmsProvisioning();
 
   const shutdown = (signal: string) => {
     logger.info("Shutting down", { signal });

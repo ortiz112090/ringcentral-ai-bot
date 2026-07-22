@@ -98,6 +98,8 @@ export interface BotConfigRow {
   text_enabled: boolean | null;
   /** Dedicated Twilio SMS number for this bot (E.164), separate from the voice number. */
   text_number: string | null;
+  /** RingCentral SMS number for this bot (E.164); null = RC texting off. See migration 0012. */
+  rc_sms_number: string | null;
   /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
   text_model: string | null;
   /** Business name used in SMS identification (falls back to agent_name). */
