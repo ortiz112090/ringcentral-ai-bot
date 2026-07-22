@@ -65,6 +65,13 @@ export const config = {
   // closed (503) rather than trust an unauthenticated delivery callback.
   dcWebhookToken: optional("DC_WEBHOOK_TOKEN", ""),
 
+  // Verification token guarding the RingCentral SMS webhook
+  // (POST /webhooks/ringcentral/sms). Set on the RC webhook subscription's
+  // deliveryMode.verificationToken; RC echoes it in the Verification-Token header
+  // on every delivered event. When unset the webhook fails closed (503) rather
+  // than process unauthenticated payloads.
+  rcSmsWebhookToken: optional("RC_SMS_WEBHOOK_TOKEN", ""),
+
   // NOTE: RingCentral/OpenAI credentials are read leniently (optional, default "")
   // rather than fail-fast, because they may instead be supplied by Supabase and
   // merged env-first in resolveEffectiveConfig(). Only SUPABASE_URL and
@@ -174,6 +181,11 @@ export interface EffectiveConfig {
     enabled: boolean;
     /** Dedicated Twilio SMS number (E.164) this bot texts from / receives on. */
     number: string | undefined;
+    /**
+     * RingCentral SMS number (E.164) this bot texts from / receives on. Undefined
+     * = RingCentral texting is off for this tenant (Twilio texting is unaffected).
+     */
+    rcSmsNumber: string | undefined;
     /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
     model: string;
     /** Business name for SMS identification; falls back to agentName. */
@@ -330,6 +342,17 @@ export function twilioSmsWebhookUrl(): string {
 }
 
 /**
+ * Public URL RingCentral delivers inbound-SMS message-store events to (the RC SMS
+ * webhook). Used both as the subscription's deliveryMode.address when provisioning
+ * and to match an existing subscription as ours. Returns "" when PUBLIC_BASE_URL
+ * is unset so provisioning can skip rather than register a broken address.
+ */
+export function ringcentralSmsWebhookUrl(): string {
+  const base = publicBase();
+  return base ? `${base}/webhooks/ringcentral/sms` : "";
+}
+
+/**
  * Callback URL Drop Cowboy POSTs RVM delivery status to, with the shared token as a
  * query param so the webhook can fail closed on a missing/wrong token. Returns ""
  * when PUBLIC_BASE_URL is unset so the worker can detect the misconfiguration.
@@ -431,6 +454,8 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       enabled: botConfig?.text_enabled === true,
       // Non-secret per-tenant column; env-first like the voice number.
       number: envFirst("TWILIO_SMS_NUMBER", botConfig?.text_number),
+      // RingCentral texting number; non-secret per-tenant column, env-first.
+      rcSmsNumber: envFirst("RC_SMS_NUMBER", botConfig?.rc_sms_number),
       model:
         envFirst("OPENAI_TEXT_MODEL", botConfig?.text_model) ?? "gpt-4o-mini",
       businessName:

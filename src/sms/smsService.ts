@@ -15,9 +15,11 @@ import {
   findConversationByPhone,
   getConversationMessages,
   getTextStages,
+  hasProviderMessage,
   insertTextMessage,
   isPhoneOptedOut,
   updateConversationStatus,
+  type TextChannel,
   type TextConversationRow,
   type TextStageRow,
   type TextTrigger,
@@ -42,9 +44,13 @@ function toChatTurns(
 }
 
 /**
- * Handle one inbound SMS (already signature-verified + routed to this tenant).
- * Returns nothing — replies are sent via the Twilio REST API inside sendSms so the
- * webhook can just return empty TwiML. Order of operations:
+ * Handle one inbound SMS (already authenticated + routed to this tenant). Channel-
+ * agnostic: the Twilio and RingCentral webhooks are two doorways into this SAME
+ * pipeline. `channel` decides which sender the reply goes out on (via the
+ * conversation row); `providerMessageId` (RingCentral only) dedupes redeliveries.
+ * Returns nothing — replies are sent via REST inside sendSms so the webhook can ack
+ * immediately. Order of operations:
+ *   0. Dedupe (RC): skip if this provider message id is already stored.
  *   1. STOP/UNSUBSCRIBE → mark opted_out, no reply (Twilio sends its own confirm).
  *   2. HELP → identification reply.
  *   3. Already opted out → ignore (never text again).
@@ -53,17 +59,30 @@ function toChatTurns(
 export async function handleInboundSms(input: {
   from: string;
   body: string;
+  channel?: TextChannel;
+  providerMessageId?: string | null;
 }): Promise<void> {
   const { from, body } = input;
+  const channel: TextChannel = input.channel ?? "twilio";
+  const providerMessageId = input.providerMessageId ?? null;
   const keyword = classifyInboundKeyword(body);
+
+  // 0. Dedupe: RingCentral may redeliver the same message-store event. If we've
+  //    already stored this provider message id, do nothing (idempotent).
+  if (providerMessageId && (await hasProviderMessage(providerMessageId))) {
+    logger.info("Skipping duplicate inbound SMS (provider_message_id already stored)", {
+      channel,
+    });
+    return;
+  }
 
   // 1. STOP: opt the number out and stop. Record the inbound for the audit trail.
   if (keyword === "stop") {
     const convo =
       (await findConversationByPhone(from)) ??
-      (await createConversation({ phone_number: from, trigger: "inbound" }));
+      (await createConversation({ phone_number: from, trigger: "inbound", channel }));
     if (convo) {
-      await insertTextMessage({ conversationId: convo.id, direction: "inbound", body });
+      await insertTextMessage({ conversationId: convo.id, direction: "inbound", body, providerMessageId });
       await updateConversationStatus(convo.id, "opted_out");
     }
     logger.info("Inbound STOP: conversation opted out", { hasConvo: Boolean(convo) });
@@ -78,13 +97,13 @@ export async function handleInboundSms(input: {
 
   const convo =
     (await findConversationByPhone(from)) ??
-    (await createConversation({ phone_number: from, trigger: "inbound" }));
+    (await createConversation({ phone_number: from, trigger: "inbound", channel }));
   if (!convo) {
     logger.error("Could not obtain a conversation for inbound SMS; dropping");
     return;
   }
 
-  await insertTextMessage({ conversationId: convo.id, direction: "inbound", body });
+  await insertTextMessage({ conversationId: convo.id, direction: "inbound", body, providerMessageId });
 
   // 2. HELP: short identification reply (a reply to inbound → no STOP suffix needed).
   if (keyword === "help") {

@@ -2,6 +2,7 @@ import { resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { getTwilioClient } from "../twilio/client";
 import { OPT_OUT_SUFFIX } from "./smsCompliance";
+import { sendRcSms } from "./rcSms";
 import {
   insertTextMessage,
   isPhoneOptedOut,
@@ -24,9 +25,11 @@ export interface SendResult {
  *     "Reply STOP to opt out." suffix if the model didn't already include it. Not
  *     added on replies to inbound texts (the user initiated; they can reply STOP).
  *
- * Uses this tenant's Twilio REST client (DB-first credentials) and the dedicated
- * text number as the From. Never throws — a send failure is logged and returned as
- * { sent: false } so callers (webhook/triggers) stay non-fatal.
+ * Reply channel follows the conversation: a 'ringcentral' conversation sends via
+ * the RingCentral client (sendRcSms), everything else via this tenant's Twilio REST
+ * client (DB-first credentials) and text_number as the From. Never throws — a send
+ * failure is logged and returned as { sent: false } so callers (webhook/triggers)
+ * stay non-fatal.
  */
 export async function sendSms(input: {
   conversation: TextConversationRow;
@@ -44,6 +47,29 @@ export async function sendSms(input: {
     return { sent: false, reason: "opted_out" };
   }
 
+  const body = input.firstBotInitiated ? withOptOutSuffix(input.body) : input.body;
+
+  // Reply out the SAME channel the conversation lives on.
+  const result =
+    conversation.channel === "ringcentral"
+      ? await sendViaRingCentral(conversation, phone, body)
+      : await sendViaTwilio(conversation, phone, body);
+  if (!result.sent) return result;
+
+  await insertTextMessage({
+    conversationId: conversation.id,
+    direction: "outbound",
+    body,
+  });
+  return { sent: true };
+}
+
+/** Twilio-channel send: tenant text_number as From via the REST client. */
+async function sendViaTwilio(
+  conversation: TextConversationRow,
+  phone: string,
+  body: string
+): Promise<SendResult> {
   const { text } = await resolveEffectiveConfig();
   const from = text.number;
   if (!from) {
@@ -61,8 +87,6 @@ export async function sendSms(input: {
     return { sent: false, reason: "no_credentials" };
   }
 
-  const body = input.firstBotInitiated ? withOptOutSuffix(input.body) : input.body;
-
   try {
     await client.messages.create({ from, to: phone, body });
   } catch (err) {
@@ -72,12 +96,19 @@ export async function sendSms(input: {
     });
     return { sent: false, reason: "error" };
   }
+  return { sent: true };
+}
 
-  await insertTextMessage({
-    conversationId: conversation.id,
-    direction: "outbound",
-    body,
-  });
+/** RingCentral-channel send: rc_sms_number as From via the RC client. */
+async function sendViaRingCentral(
+  conversation: TextConversationRow,
+  phone: string,
+  body: string
+): Promise<SendResult> {
+  const res = await sendRcSms({ to: phone, text: body });
+  if (!res.sent) {
+    return { sent: false, reason: res.reason ?? "error" };
+  }
   return { sent: true };
 }
 

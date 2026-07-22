@@ -20,6 +20,9 @@ export type TextTrigger = "inbound" | "missed_call" | "web_lead";
 
 export type TextDirection = "inbound" | "outbound";
 
+/** Which provider a conversation lives on; decides the reply sender. */
+export type TextChannel = "twilio" | "ringcentral";
+
 /** A dashboard-authored SMS script stage (text_stages), same shape as script_stages. */
 export interface TextStageRow {
   stage_key: string;
@@ -44,6 +47,8 @@ export interface TextConversationRow {
   phone_number: string;
   status: TextConversationStatus;
   trigger: TextTrigger;
+  /** Provider this thread lives on; replies go out this channel (default 'twilio'). */
+  channel: TextChannel;
   captured_data: Record<string, unknown> | null;
   last_message_at: string | null;
   created_at: string | null;
@@ -108,6 +113,7 @@ export async function createConversation(input: {
   phone_number: string;
   trigger: TextTrigger;
   status?: TextConversationStatus;
+  channel?: TextChannel;
   captured_data?: Record<string, unknown>;
 }): Promise<TextConversationRow | null> {
   const now = new Date().toISOString();
@@ -118,6 +124,8 @@ export async function createConversation(input: {
       phone_number: input.phone_number,
       status: input.status ?? "active",
       trigger: input.trigger,
+      // Default to the Twilio channel so pre-RC callers keep their behavior.
+      channel: input.channel ?? "twilio",
       captured_data: input.captured_data ?? {},
       last_message_at: now,
       created_at: now,
@@ -143,6 +151,8 @@ export async function insertTextMessage(input: {
   conversationId: string;
   direction: TextDirection;
   body: string;
+  /** Upstream provider message id (RingCentral message-store id) for dedupe; null for Twilio. */
+  providerMessageId?: string | null;
 }): Promise<void> {
   const now = new Date().toISOString();
   const { error } = await supabase.from("text_messages").insert({
@@ -150,6 +160,7 @@ export async function insertTextMessage(input: {
     conversation_id: input.conversationId,
     direction: input.direction,
     body: input.body,
+    provider_message_id: input.providerMessageId ?? null,
     created_at: now,
   });
   if (error) {
@@ -197,6 +208,33 @@ export async function getConversationMessages(
   }
   // Fetched newest-first for the cap; return in chronological order for the model.
   return ((data as TextMessageRow[]) ?? []).reverse();
+}
+
+/**
+ * True when a text_messages row for this bot already stores the given provider
+ * message id. Used to dedupe inbound RingCentral deliveries (RC may redeliver the
+ * same message-store event). Failure-tolerant: on a query error returns false so a
+ * DB blip never permanently drops a real inbound message — the in-memory LRU in the
+ * webhook is the fast first line, this is the durable second check.
+ */
+export async function hasProviderMessage(
+  providerMessageId: string,
+  botId: string = BOT_ID
+): Promise<boolean> {
+  const id = (providerMessageId ?? "").trim();
+  if (id === "") return false;
+  const { count, error } = await supabase
+    .from("text_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("bot_id", botId)
+    .eq("provider_message_id", id);
+  if (error) {
+    logger.error("Failed to check provider_message_id dedupe; treating as new", {
+      error: error.message,
+    });
+    return false;
+  }
+  return (count ?? 0) > 0;
 }
 
 /**
