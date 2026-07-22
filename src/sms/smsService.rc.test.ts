@@ -44,7 +44,7 @@ vi.mock("./smsQueries", () => ({
 const sendSms = vi.fn(async () => ({ sent: true }));
 vi.mock("./smsSend", () => ({ sendSms: (...a: any[]) => sendSms(...a) }));
 
-const runSmsTurn = vi.fn(async () => ({ reply: "Hi!", escalate: false, optedOut: false, captured: {} }));
+const runSmsTurn = vi.fn(async () => ({ reply: "Hi!", escalate: false, optedOut: false, declined: false, captured: {} }));
 vi.mock("./smsEngine", () => ({ runSmsTurn: (...a: any[]) => runSmsTurn(...a) }));
 
 const findLeadByPhone = vi.fn(async () => null);

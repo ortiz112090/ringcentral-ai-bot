@@ -7,6 +7,7 @@ import {
   createConversation,
   findConversationByPhone,
   getActiveOutreachTemplates,
+  isPhoneDeclined,
   isPhoneOptedOut,
   type TextChannel,
   type TextConversationRow,
@@ -163,6 +164,18 @@ async function sendToContact(
     if (await isPhoneOptedOut(contact.phone_number)) {
       await setContactStatus(contact.id, "skipped", "opted_out");
       logger.info("Text-outreach skipped: number opted out", {
+        botId: BOT_ID,
+        campaignId: campaign.id,
+        contactId: contact.id,
+      });
+      return;
+    }
+
+    // Interest gate: never re-text a number that already declined on this bot
+    // (mirrors the opt-out skip; a decline is terminal, same as opted_out).
+    if (await isPhoneDeclined(contact.phone_number)) {
+      await setContactStatus(contact.id, "skipped", "declined");
+      logger.info("Text-outreach skipped: number declined", {
         botId: BOT_ID,
         campaignId: campaign.id,
         contactId: contact.id,

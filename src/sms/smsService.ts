@@ -139,6 +139,20 @@ export async function handleInboundSms(input: {
     return;
   }
 
+  if (turn.declined) {
+    // Interest gate: a clearly-negative first reply (not an opt-out). End the
+    // conversation as 'declined' so the campaign worker stops re-contacting, but
+    // DO send the model's one short polite closing line if it produced one.
+    await updateConversationStatus(convo.id, "declined");
+    logger.info("Engine marked conversation declined (interest gate)", {
+      conversationId: convo.id,
+    });
+    if (turn.reply.trim() !== "") {
+      await sendSms({ conversation: convo, body: turn.reply });
+    }
+    return;
+  }
+
   if (turn.reply.trim() !== "") {
     await sendSms({ conversation: convo, body: turn.reply });
   }

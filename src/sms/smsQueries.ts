@@ -14,7 +14,8 @@ export type TextConversationStatus =
   | "active"
   | "completed"
   | "escalated"
-  | "opted_out";
+  | "opted_out"
+  | "declined";
 
 export type TextTrigger = "inbound" | "missed_call" | "web_lead";
 
@@ -282,6 +283,33 @@ export async function isPhoneOptedOut(
     .eq("status", "opted_out");
   if (error) {
     logger.error("Failed to check opt-out status; failing closed", {
+      phone,
+      error: error.message,
+    });
+    return true;
+  }
+  return (count ?? 0) > 0;
+}
+
+/**
+ * True when this phone has EVER declined on this bot (any 'declined' conversation).
+ * Like opt-out, a decline is terminal per bot+number: once the lead said they're not
+ * interested (via the interest gate / mark_not_interested), the campaign worker must
+ * not re-contact them. Failure-tolerant: on a query error returns true (fail CLOSED),
+ * mirroring isPhoneOptedOut — a compliance check must never send on a DB blip.
+ */
+export async function isPhoneDeclined(
+  phone: string,
+  botId: string = BOT_ID
+): Promise<boolean> {
+  const { count, error } = await supabase
+    .from("text_conversations")
+    .select("id", { count: "exact", head: true })
+    .eq("bot_id", botId)
+    .eq("phone_number", phone)
+    .eq("status", "declined");
+  if (error) {
+    logger.error("Failed to check declined status; failing closed", {
       phone,
       error: error.message,
     });

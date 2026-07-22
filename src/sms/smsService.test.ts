@@ -36,7 +36,7 @@ vi.mock("./smsQueries", () => ({
 const sendSms = vi.fn(async () => ({ sent: true }));
 vi.mock("./smsSend", () => ({ sendSms: (...a: any[]) => sendSms(...a) }));
 
-const runSmsTurn = vi.fn(async () => ({ reply: "Hi!", escalate: false, optedOut: false, captured: {} }));
+const runSmsTurn = vi.fn(async () => ({ reply: "Hi!", escalate: false, optedOut: false, declined: false, captured: {} }));
 vi.mock("./smsEngine", () => ({ runSmsTurn: (...a: any[]) => runSmsTurn(...a) }));
 
 const findLeadByPhone = vi.fn(async () => null);
@@ -74,7 +74,7 @@ beforeEach(() => {
   isPhoneOptedOut.mockResolvedValue(false);
   findConversationByPhone.mockResolvedValue(null);
   createConversation.mockResolvedValue({ id: "conv-1", phone_number: "+15557778888", status: "active" });
-  runSmsTurn.mockResolvedValue({ reply: "Hi!", escalate: false, optedOut: false, captured: {} });
+  runSmsTurn.mockResolvedValue({ reply: "Hi!", escalate: false, optedOut: false, declined: false, captured: {} });
 });
 
 describe("handleInboundSms", () => {
@@ -105,10 +105,26 @@ describe("handleInboundSms", () => {
   });
 
   it("on engine opt-out: marks opted_out and does NOT reply", async () => {
-    runSmsTurn.mockResolvedValue({ reply: "", escalate: false, optedOut: true, captured: {} });
+    runSmsTurn.mockResolvedValue({ reply: "", escalate: false, optedOut: true, declined: false, captured: {} });
     await handleInboundSms({ from: "+15557778888", body: "stop texting me please" });
     expect(updateConversationStatus).toHaveBeenCalledWith("conv-1", "opted_out");
     expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("on engine decline (interest gate): marks declined and sends the one closing line", async () => {
+    runSmsTurn.mockResolvedValue({
+      reply: "No problem — thanks for your time!",
+      escalate: false,
+      optedOut: false,
+      declined: true,
+      captured: {},
+    });
+    await handleInboundSms({ from: "+15557778888", body: "not interested" });
+    expect(updateConversationStatus).toHaveBeenCalledWith("conv-1", "declined");
+    expect(updateConversationStatus).not.toHaveBeenCalledWith("conv-1", "opted_out");
+    expect(sendSms).toHaveBeenCalledWith(
+      expect.objectContaining({ body: "No problem — thanks for your time!" })
+    );
   });
 
   it("on engine escalate: replies, marks escalated, and notifies the owner", async () => {
