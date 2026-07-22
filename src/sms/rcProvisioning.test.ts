@@ -30,11 +30,18 @@ vi.mock("../config", () => ({
 const rcGet = vi.fn(async () => ({ records: [] as any[] }));
 const rcPost = vi.fn(async () => ({ id: "sub-new", expirationTime: farFuture() }));
 const rcDelete = vi.fn(async () => undefined);
-vi.mock("../ringcentral/client", () => ({
-  rcGet: (...a: any[]) => rcGet(...a),
-  rcPost: (...a: any[]) => rcPost(...a),
-  rcDelete: (...a: any[]) => rcDelete(...a),
-}));
+vi.mock("../ringcentral/client", async () => {
+  const actual = await vi.importActual<typeof import("../ringcentral/client")>(
+    "../ringcentral/client"
+  );
+  return {
+    rcGet: (...a: any[]) => rcGet(...a),
+    rcPost: (...a: any[]) => rcPost(...a),
+    rcDelete: (...a: any[]) => rcDelete(...a),
+    // Use the real helper so the wiring test exercises actual error-body extraction.
+    extractRcErrorDetail: actual.extractRcErrorDetail,
+  };
+});
 
 // The rc_sms_options read-model write is exercised as a spy; the DB layer itself
 // (delete-then-insert) is covered in smsQueries.rcOptions.test.ts.
@@ -214,6 +221,44 @@ describe("provisionRcSmsSubscription — create / idempotence / renewal", () => 
     expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining("provisioning failed"),
       expect.objectContaining({ error: "RC 500" })
+    );
+  });
+
+  it("logs the RC error body (errorCode + errors[]) when a create is rejected by RC", async () => {
+    // Simulate the RC SDK ApiError: err.message is the terse top-level string while
+    // the full diagnostic detail lives in the fetch-style .response JSON body. The
+    // body is read via .clone() so any other caller's stream stays intact.
+    const errorBody = {
+      errorCode: "CMN-101",
+      message: "Parameter [deliveryMode.verificationToken] value is invalid",
+      errors: [
+        {
+          errorCode: "CMN-101",
+          parameterName: "deliveryMode.verificationToken",
+          message: "Value is invalid",
+        },
+      ],
+    };
+    const apiError: any = new Error(
+      "Parameter [deliveryMode.verificationToken] value is invalid"
+    );
+    apiError.response = {
+      status: 400,
+      clone: () => ({ json: async () => errorBody }),
+      json: async () => errorBody,
+    };
+    rcGet.mockResolvedValue({ records: [] }); // no existing sub → attempts a create
+    rcPost.mockRejectedValue(apiError);
+
+    await expect(provisionRcSmsSubscription()).resolves.toBeUndefined();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("provisioning failed"),
+      expect.objectContaining({
+        error: "Parameter [deliveryMode.verificationToken] value is invalid",
+        errorCode: "CMN-101",
+        errors: errorBody.errors,
+      })
     );
   });
 });

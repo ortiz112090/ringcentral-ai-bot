@@ -1,7 +1,7 @@
 import { config, resolveEffectiveConfig, ringcentralSmsWebhookUrl } from "../config";
 import { logger } from "../logger";
 import { BOT_ID } from "../db/remoteConfig";
-import { rcGet, rcPost, rcDelete } from "../ringcentral/client";
+import { rcGet, rcPost, rcDelete, extractRcErrorDetail } from "../ringcentral/client";
 import { roleAllows } from "../roles";
 import { replaceRcSmsOptions, type RcSmsOptionInput } from "./smsQueries";
 
@@ -201,10 +201,13 @@ export async function provisionRcSmsSubscription(): Promise<void> {
       try {
         await rcDelete(`${SUBSCRIPTION_BASE}/${String(existing.id)}`);
       } catch (err) {
+        const detail = await extractRcErrorDetail(err);
         logger.warn("Failed to delete stale RC SMS subscription before recreate", {
           botId: BOT_ID,
           id: existing.id,
           error: err instanceof Error ? err.message : String(err),
+          errorCode: detail?.errorCode,
+          errors: detail?.errors,
         });
       }
       await createSubscription(gate.address, gate.extensionId);
@@ -221,10 +224,13 @@ export async function provisionRcSmsSubscription(): Promise<void> {
         await renewSubscription(String(existing.id));
       } catch (err) {
         // Renew failed (e.g. subscription vanished/blacklisted): recreate fresh.
+        const detail = await extractRcErrorDetail(err);
         logger.error("RC SMS subscription renewal failed; recreating", {
           botId: BOT_ID,
           id: existing.id,
           error: err instanceof Error ? err.message : String(err),
+          errorCode: detail?.errorCode,
+          errors: detail?.errors,
         });
         await createSubscription(gate.address, gate.extensionId);
       }
@@ -238,9 +244,12 @@ export async function provisionRcSmsSubscription(): Promise<void> {
     });
   } catch (err) {
     // Never fatal: a slow/down RC API must not crash startup or the poller.
+    const detail = await extractRcErrorDetail(err);
     logger.error("RC SMS subscription provisioning failed (service still running)", {
       botId: BOT_ID,
       error: err instanceof Error ? err.message : String(err),
+      errorCode: detail?.errorCode,
+      errors: detail?.errors,
     });
   }
 }

@@ -221,6 +221,34 @@ function httpStatusOf(err: unknown): number | undefined {
 }
 
 /**
+ * Extract the parsed RingCentral error body from an SDK ApiError. The SDK throws
+ * an ApiError carrying a fetch-style `.response`; RC's error responses carry a JSON
+ * body with `errorCode`, `message`, and an `errors[]` array (parameterName/reason
+ * detail) that `err.message` alone hides. Returns undefined when there is no
+ * response, no JSON body, or the body isn't a JSON object.
+ *
+ * The response body is a one-shot stream, so we read a `clone()` when available to
+ * avoid consuming the body other callers (e.g. withRateLimitRetry) may still need.
+ * Never throws — diagnostics must not turn a logged failure into a crash.
+ */
+export async function extractRcErrorDetail(
+  err: unknown
+): Promise<Record<string, unknown> | undefined> {
+  const response = (err as {
+    response?: { json?: () => Promise<unknown>; clone?: () => { json: () => Promise<unknown> } };
+  })?.response;
+  if (!response?.json) return undefined;
+  try {
+    const body = response.clone ? await response.clone().json() : await response.json();
+    return typeof body === "object" && body !== null
+      ? (body as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Run a RingCentral API call, retrying ONLY on HTTP 429 with exponential backoff
  * (1s, 2s, 4s, 8s … capped at 30s), up to MAX_RATE_LIMIT_RETRIES attempts. On a
  * non-429 error, or once retries are exhausted, the error is rethrown unchanged.
