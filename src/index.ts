@@ -9,6 +9,7 @@ import { dropcowboyRouter } from "./campaigns/rvmRoutes";
 import { startRvmWorker } from "./campaigns/rvmWorker";
 import { outboundVoiceRouter } from "./campaigns/outboundRoutes";
 import { startOutboundWorker } from "./campaigns/outboundWorker";
+import { startAnalyzerWorker } from "./learning/analyzer";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { provisionTextNumber, provisionTwilioNumber } from "./twilio/provisioning";
 import { startRcSmsProvisioning } from "./sms/rcProvisioning";
@@ -113,6 +114,10 @@ async function main(): Promise<void> {
   // renewed (hourly poller). Self-gates on the texting role, rc_sms_number, and
   // RC_SMS_WEBHOOK_TOKEN (read fresh); never fatal (wraps its own try/catch).
   startRcSmsProvisioning();
+
+  // Daily script-suggestion analyzer. Self-gates on the texting role + "nothing new";
+  // inserts only PENDING suggestions (dashboard-approved), never edits the live script.
+  startAnalyzerWorker();
 
   const shutdown = (signal: string) => {
     logger.info("Shutting down", { signal });
