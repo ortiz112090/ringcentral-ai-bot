@@ -5,6 +5,7 @@ import { healthRouter } from "./routes/health";
 import { webhookRouter } from "./routes/webhooks";
 import { twilioVoiceRouter } from "./twilio/voiceWebhook";
 import { smsRouter } from "./sms/smsRoutes";
+import { rcOAuthRouter } from "./sms/rcOAuth";
 import { dropcowboyRouter } from "./campaigns/rvmRoutes";
 import { startRvmWorker } from "./campaigns/rvmWorker";
 import { outboundVoiceRouter } from "./campaigns/outboundRoutes";
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
   app.use(webhookRouter);
   app.use(twilioVoiceRouter);
   app.use(smsRouter);
+  app.use(rcOAuthRouter);
   app.use(dropcowboyRouter);
   app.use(outboundVoiceRouter);
 

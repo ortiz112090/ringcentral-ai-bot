@@ -106,6 +106,13 @@ export interface BotConfigRow {
    * absent-tolerant so older schemas without the column resolve to that default.
    */
   rc_sms_extension_id: string | null;
+  /**
+   * Display-only label of the RingCentral identity the bot is signed in as via
+   * OAuth (see migration 0017), e.g. "Joal Ortiz — ext 499 (+1205...)". '' when
+   * signed out. Non-secret; the refresh token itself lives in api_credentials.
+   * Nullable/absent-tolerant so older schemas resolve to signed-out.
+   */
+  rc_signed_in_label: string | null;
   /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
   text_model: string | null;
   /** Business name used in SMS identification (falls back to agent_name). */

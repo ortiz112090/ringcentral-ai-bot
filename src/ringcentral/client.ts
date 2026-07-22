@@ -1,7 +1,9 @@
 import { SDK } from "@ringcentral/sdk";
 import { resolveEffectiveConfig } from "../config";
-import { BOT_ID } from "../db/remoteConfig";
+import { BOT_ID, getCredential } from "../db/remoteConfig";
 import { logger } from "../logger";
+import { getRcOAuthAccessToken } from "./rcAuth";
+import { RC_REFRESH_TOKEN_KEY } from "../db/rcOAuthQueries";
 
 /**
  * RingCentral SDK wrapper using the JWT (server-to-server) auth flow.
@@ -27,7 +29,7 @@ interface RcClient {
   clientId: string;
   clientSecret: string;
   serverUrl: string;
-  jwt: string;
+  jwt: string | undefined;
 }
 
 let current: RcClient | null = null;
@@ -59,10 +61,12 @@ async function ensureClient(): Promise<RcClient> {
     const { ringcentral } = await resolveEffectiveConfig();
     const { clientId, clientSecret, serverUrl, jwt } = ringcentral;
 
+    // client_id/client_secret are required for BOTH auth modes (JWT and OAuth
+    // refresh-token). jwt is checked lazily in ensureLogin's JWT branch so an
+    // OAuth-only bot (refresh token, no JWT) still authenticates.
     const missing: string[] = [];
     if (!clientId) missing.push("client_id");
     if (!clientSecret) missing.push("client_secret");
-    if (!jwt) missing.push("jwt");
     if (missing.length > 0) {
       throw new Error(
         `RingCentral credentials missing/incomplete for tenant BOT_ID=${BOT_ID}: ` +
@@ -100,7 +104,7 @@ async function ensureClient(): Promise<RcClient> {
         clientId: clientId as string,
         clientSecret: clientSecret as string,
         serverUrl,
-        jwt: jwt as string,
+        jwt,
       };
       loginPromise = null; // any prior login belonged to the old client
     }
@@ -109,10 +113,63 @@ async function ensureClient(): Promise<RcClient> {
   });
 }
 
+// Assumed access-token lifetime (s) written into the SDK auth data when we inject
+// an OAuth access token we obtained ourselves. rcAuth manages the real refresh
+// cadence (refresh at expiry−60s); this only needs to keep the SDK from treating
+// the freshly-set token as already expired.
+const OAUTH_TOKEN_TTL_S = 3600;
+
+/**
+ * Per-bot auth precedence: if this bot has an OAuth refresh token, authenticate AS
+ * the signed-in RingCentral user (grant_type=refresh_token) and inject the access
+ * token into the SDK, taking precedence over the JWT. getRcOAuthAccessToken returns
+ * null when the refresh token is unusable (invalid_grant/transient), in which case
+ * we fall back to the JWT flow. Returns true when an OAuth session was established.
+ */
+async function tryOAuthLogin(client: RcClient): Promise<boolean> {
+  const refreshToken = getCredential("ringcentral", RC_REFRESH_TOKEN_KEY);
+  if (!refreshToken || refreshToken.trim() === "") return false;
+
+  const accessToken = await getRcOAuthAccessToken({
+    botId: BOT_ID,
+    serverUrl: client.serverUrl,
+    clientId: client.clientId,
+    clientSecret: client.clientSecret,
+    refreshToken: refreshToken.trim(),
+  });
+  if (!accessToken) return false;
+
+  // Inject the token into the SDK auth store. No refresh_token is stored on the
+  // SDK: rcAuth owns refresh + rotation, so the SDK must not auto-refresh.
+  await client.platform.auth().setData({
+    token_type: "bearer",
+    access_token: accessToken,
+    expires_in: String(OAUTH_TOKEN_TTL_S),
+  });
+  return true;
+}
+
 /** Ensures we have a valid, authenticated platform session (idempotent). */
 export async function ensureLogin(): Promise<void> {
   const client = await ensureClient();
+
+  // OAuth refresh token wins over JWT when present. Run each call so an expiring
+  // (or just-signed-in) OAuth token is refreshed/injected before the API call.
+  if (await tryOAuthLogin(client)) {
+    loginPromise = null; // any prior JWT login is superseded
+    return;
+  }
+
   if (await client.platform.loggedIn()) return;
+
+  // JWT flow (unchanged). jwt is required here; an OAuth-only bot never reaches this.
+  if (!client.jwt) {
+    throw new Error(
+      `RingCentral credentials missing/incomplete for tenant BOT_ID=${BOT_ID}: jwt. ` +
+        `Set it in Supabase api_credentials (provider "ringcentral") for this bot, or ` +
+        `sign in with RingCentral (OAuth); env-var fallback applies only to the primary bot.`
+    );
+  }
   if (!loginPromise) {
     loginPromise = client.platform
       .login({ jwt: client.jwt })
