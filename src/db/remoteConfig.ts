@@ -100,6 +100,12 @@ export interface BotConfigRow {
   text_number: string | null;
   /** RingCentral SMS number for this bot (E.164); null = RC texting off. See migration 0012. */
   rc_sms_number: string | null;
+  /**
+   * Chosen RingCentral extension id the bot sends texts AS (see migration 0016).
+   * Null = the authenticated extension ('~'), the pre-PR-G behavior. Nullable/
+   * absent-tolerant so older schemas without the column resolve to that default.
+   */
+  rc_sms_extension_id: string | null;
   /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
   text_model: string | null;
   /** Business name used in SMS identification (falls back to agent_name). */

@@ -290,6 +290,50 @@ export async function isPhoneOptedOut(
   return (count ?? 0) > 0;
 }
 
+/**
+ * One synced RingCentral SMS sender option (rc_sms_options): an
+ * (extension, SMS-capable phone number) pair the dashboard offers as a
+ * "send as / from" choice. See migration 0016_rc_sender_choice.sql.
+ */
+export interface RcSmsOptionInput {
+  extension_id: string;
+  extension_name: string;
+  extension_number: string;
+  phone_number: string;
+  sms_enabled: boolean;
+}
+
+/**
+ * Replace this bot's rc_sms_options read-model rows: delete the bot's existing rows,
+ * then bulk-insert the freshly-synced set. Called by the RC options poller only AFTER
+ * a successful fetch, so a failed fetch never wipes the old rows. Failure-tolerant: a
+ * delete error leaves the old rows in place (logged, no insert); an insert error is
+ * logged. Never throws, so the never-throwing poller stays non-fatal.
+ */
+export async function replaceRcSmsOptions(
+  options: RcSmsOptionInput[],
+  botId: string = BOT_ID
+): Promise<void> {
+  const { error: delErr } = await supabase
+    .from("rc_sms_options")
+    .delete()
+    .eq("bot_id", botId);
+  if (delErr) {
+    logger.error("Failed to clear rc_sms_options; leaving old rows in place", {
+      botId,
+      error: delErr.message,
+    });
+    return;
+  }
+  if (options.length === 0) return;
+  const now = new Date().toISOString();
+  const rows = options.map((o) => ({ bot_id: botId, ...o, synced_at: now }));
+  const { error: insErr } = await supabase.from("rc_sms_options").insert(rows);
+  if (insErr) {
+    logger.error("Failed to insert rc_sms_options", { botId, error: insErr.message });
+  }
+}
+
 /** Update a conversation's status (active/completed/escalated/opted_out). */
 export async function updateConversationStatus(
   conversationId: string,
