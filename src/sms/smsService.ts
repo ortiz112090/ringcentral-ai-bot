@@ -210,7 +210,15 @@ async function sendOpener(input: {
     businessName: text.businessName,
   });
 
-  const convo = await createConversation({ phone_number: phone, trigger });
+  // Choose the outbound channel from effective config. RingCentral-only tenants
+  // have rcSmsNumber set and no Twilio number; without this the opener would default
+  // to Twilio and fail with "no text_number configured". Prefer RC when both exist.
+  const channel: TextChannel =
+    typeof text.rcSmsNumber === "string" && text.rcSmsNumber.trim() !== ""
+      ? "ringcentral"
+      : "twilio";
+
+  const convo = await createConversation({ phone_number: phone, trigger, channel });
   if (!convo) {
     logger.error("SMS opener aborted: could not create conversation", { trigger });
     return false;
