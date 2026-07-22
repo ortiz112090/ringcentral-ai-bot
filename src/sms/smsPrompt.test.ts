@@ -46,10 +46,18 @@ describe("buildSmsSystemPrompt — script discipline", () => {
     expect(p).toMatch(/only for the missing piece/i);
   });
 
-  it("requires first AND last name before the urgency question", () => {
+  it("enforces STAGE GATING and drops the old first/last-name rule", () => {
     const p = buildSmsSystemPrompt(baseArgs);
-    expect(p).toMatch(/first and last name/i);
-    expect(p).toMatch(/urgency|how soon/i);
+    expect(p).toMatch(/STAGE GATING/);
+    expect(p).toMatch(/do NOT move on to the next stage/i);
+    expect(p).toMatch(/never skip a data-collection stage/i);
+    // The removed hard rule required BOTH names before the urgency question.
+    expect(p).not.toMatch(/captured BOTH first and last name/i);
+  });
+
+  it("mentions address, email, and start timeline in the capture tool description", () => {
+    const p = buildSmsSystemPrompt(baseArgs);
+    expect(p).toMatch(/capture_lead_info:.*home address.*email.*start timeline/i);
   });
 
   it("references the SMS tools including mark_opted_out", () => {

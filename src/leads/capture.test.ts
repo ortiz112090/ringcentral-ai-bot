@@ -24,6 +24,32 @@ describe("shared capture module — validator reuse", () => {
     // license state normalized to 2-letter upper.
     expect(validateCapturedValues(fields, { license_state: "california" }).valid.license_state).toBe("CA");
   });
+
+  it("validates and normalizes email (lowercase + trim)", () => {
+    const fields: any[] = [];
+    expect(validateCapturedValues(fields, { email: "  Sam@Example.COM " }).valid.email).toBe(
+      "sam@example.com"
+    );
+    expect(validateCapturedValues(fields, { email: "not-an-email" }).invalid.email).toMatch(
+      /invalid email address/i
+    );
+    expect(validateCapturedValues(fields, { email: "a@b" }).invalid.email).toMatch(
+      /invalid email address/i
+    );
+    // A field labeled "Email" (custom key) is treated as an email too.
+    const labeled: any[] = [{ field_key: "contact", label: "Email", field_type: "text" }];
+    expect(validateCapturedValues(labeled, { contact: "X@Y.io" }).valid.contact).toBe("x@y.io");
+  });
+
+  it("requires a non-empty start_timeline", () => {
+    const fields: any[] = [];
+    expect(validateCapturedValues(fields, { start_timeline: "ASAP" }).valid.start_timeline).toBe(
+      "ASAP"
+    );
+    expect(
+      validateCapturedValues(fields, { start_timeline: "   " }).invalid.start_timeline
+    ).toMatch(/required/i);
+  });
 });
 
 describe("buildLeadColumnUpdates", () => {
@@ -49,8 +75,23 @@ describe("buildLeadColumnUpdates", () => {
     expect(res.hasLeadColumns).toBe(false);
   });
 
+  it("maps the new contact columns (address, email, start_timeline) onto the leads row", () => {
+    const { updates, hasLeadColumns } = buildLeadColumnUpdates({
+      address: "123 Main St, Springfield, 90210",
+      email: "sam@example.com",
+      start_timeline: "this week",
+    });
+    expect(hasLeadColumns).toBe(true);
+    expect(updates.address).toBe("123 Main St, Springfield, 90210");
+    expect(updates.email).toBe("sam@example.com");
+    expect(updates.start_timeline).toBe("this week");
+  });
+
   it("exposes the leads-table key set shared by both channels", () => {
     expect(LEADS_TABLE_KEYS).toContain("first_name");
     expect(LEADS_TABLE_KEYS).toContain("license_state");
+    expect(LEADS_TABLE_KEYS).toContain("address");
+    expect(LEADS_TABLE_KEYS).toContain("email");
+    expect(LEADS_TABLE_KEYS).toContain("start_timeline");
   });
 });

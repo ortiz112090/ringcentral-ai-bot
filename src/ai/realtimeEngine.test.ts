@@ -369,7 +369,7 @@ describe("dynamic capture tool wiring + captured_data merge", () => {
 
   it("merges captured args into captured_data AND upserts known lead columns", async () => {
     const { ws, state } = await startEngine();
-    const args = { first_name: "Sam", zip_code: "90210", start_timeline: "next week" };
+    const args = { first_name: "Sam", zip_code: "90210", referral_source: "google" };
     ws.emit(
       "message",
       Buffer.from(
@@ -391,12 +391,12 @@ describe("dynamic capture tool wiring + captured_data merge", () => {
     const leadArg = upsertLead.mock.calls[0][0] as any;
     expect(leadArg.first_name).toBe("Sam");
     expect(leadArg.zip_code).toBe("90210");
-    expect(leadArg).not.toHaveProperty("start_timeline");
+    expect(leadArg).not.toHaveProperty("referral_source");
   });
 
   it("merges custom-only captures without a leads-table upsert", async () => {
     const { ws, state } = await startEngine();
-    const args = { start_timeline: "asap", address: "1 Main St, Springfield, 90210" };
+    const args = { referral_source: "google", best_time_to_call: "evenings" };
     ws.emit(
       "message",
       Buffer.from(
