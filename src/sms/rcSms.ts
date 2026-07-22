@@ -8,8 +8,12 @@ import { BOT_ID } from "../db/remoteConfig";
  * smsSend.ts. Uses the existing authenticated RingCentral client (JWT server-to-
  * server auth, DB-first credentials) and this tenant's rc_sms_number as the From.
  *
- *   POST /restapi/v1.0/account/~/extension/~/sms
+ *   POST /restapi/v1.0/account/~/extension/{id or ~}/sms
  *   { from: { phoneNumber: rcSmsNumber }, to: [{ phoneNumber }], text }
+ *
+ * When cfg.text.rcSmsExtensionId is set (non-blank) the bot sends AS that extension
+ * (an admin token sends on behalf of it); otherwise it keeps the authenticated
+ * extension ('~'). The From stays the tenant's rc_sms_number either way.
  *
  * Never throws: a missing number or an RC API failure is logged and returned as a
  * falsy result so the calling SMS pipeline (webhook/reply) stays non-fatal, exactly
@@ -21,7 +25,20 @@ export interface RcSendResult {
   reason?: string;
 }
 
-const ACCOUNT_EXTENSION_SMS = "/restapi/v1.0/account/~/extension/~/sms";
+/**
+ * The /account/~/extension/{ext}/sms endpoint the bot POSTs to. `ext` is the chosen
+ * rc_sms_extension_id when set, else '~' (the authenticated extension).
+ */
+function smsEndpoint(extensionId: string | undefined): string {
+  const ext = extensionId && extensionId.trim() !== "" ? extensionId.trim() : "~";
+  return `/restapi/v1.0/account/~/extension/${ext}/sms`;
+}
+
+/** RC error signature meaning the app lacks account-level permission to act as another extension. */
+function isInsufficientPermissions(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return msg.includes("cmn-408") || msg.includes("insufficient permission");
+}
 
 export async function sendRcSms(input: {
   to: string;
@@ -37,16 +54,25 @@ export async function sendRcSms(input: {
   }
 
   try {
-    await rcPost(ACCOUNT_EXTENSION_SMS, {
+    await rcPost(smsEndpoint(text.rcSmsExtensionId), {
       from: { phoneNumber: from.trim() },
       to: [{ phoneNumber: input.to }],
       text: input.text,
     });
   } catch (err) {
-    logger.error("Failed to send SMS via RingCentral", {
-      botId: BOT_ID,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    if (text.rcSmsExtensionId && isInsufficientPermissions(err)) {
+      logger.error(
+        "RingCentral SMS send rejected: the RingCentral app needs account-level SMS " +
+          "permission to send as another user (extension). Grant it or clear " +
+          "rc_sms_extension_id to send as the authenticated extension.",
+        { botId: BOT_ID, rcSmsExtensionId: text.rcSmsExtensionId }
+      );
+    } else {
+      logger.error("Failed to send SMS via RingCentral", {
+        botId: BOT_ID,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return { sent: false, reason: "error" };
   }
   return { sent: true };

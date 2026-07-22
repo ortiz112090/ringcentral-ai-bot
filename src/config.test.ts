@@ -98,3 +98,26 @@ describe("resolveEffectiveConfig transcribeModel", () => {
     expect(eff.openai.transcribeModel).toBe("gpt-4o-mini-transcribe");
   });
 });
+
+describe("resolveEffectiveConfig rcSmsExtensionId", () => {
+  const original = process.env.RC_SMS_EXTENSION_ID;
+
+  beforeEach(() => {
+    delete process.env.RC_SMS_EXTENSION_ID;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.RC_SMS_EXTENSION_ID;
+    else process.env.RC_SMS_EXTENSION_ID = original;
+  });
+
+  it("is undefined when no env override and no bot_config value (authenticated extension)", async () => {
+    const eff = await resolveEffectiveConfig();
+    expect(eff.text.rcSmsExtensionId).toBeUndefined();
+  });
+
+  it("respects the RC_SMS_EXTENSION_ID env override", async () => {
+    process.env.RC_SMS_EXTENSION_ID = "4056789012";
+    const eff = await resolveEffectiveConfig();
+    expect(eff.text.rcSmsExtensionId).toBe("4056789012");
+  });
+});

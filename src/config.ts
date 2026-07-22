@@ -186,6 +186,12 @@ export interface EffectiveConfig {
      * = RingCentral texting is off for this tenant (Twilio texting is unaffected).
      */
     rcSmsNumber: string | undefined;
+    /**
+     * Chosen RingCentral extension id the bot sends texts AS. Undefined = the
+     * authenticated extension ('~'), the pre-PR-G behavior. The RC send path and
+     * the inbound message-store subscription both target this extension.
+     */
+    rcSmsExtensionId: string | undefined;
     /** OpenAI chat model for SMS turns (default 'gpt-4o-mini'). */
     model: string;
     /** Business name for SMS identification; falls back to agentName. */
@@ -456,6 +462,9 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       number: envFirst("TWILIO_SMS_NUMBER", botConfig?.text_number),
       // RingCentral texting number; non-secret per-tenant column, env-first.
       rcSmsNumber: envFirst("RC_SMS_NUMBER", botConfig?.rc_sms_number),
+      // Chosen RC extension to send as; non-secret per-tenant column, env-first.
+      // Undefined keeps the authenticated-extension ('~') behavior.
+      rcSmsExtensionId: envFirst("RC_SMS_EXTENSION_ID", botConfig?.rc_sms_extension_id),
       model:
         envFirst("OPENAI_TEXT_MODEL", botConfig?.text_model) ?? "gpt-4o-mini",
       businessName:

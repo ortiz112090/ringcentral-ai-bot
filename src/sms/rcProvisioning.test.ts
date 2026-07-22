@@ -3,23 +3,44 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Tenant config + RC client. resolveEffectiveConfig returns the slices the
 // provisioner reads (text.rcSmsNumber, botRole); ringcentralSmsWebhookUrl yields
 // the fixed public address.
-const effectiveText: { rcSmsNumber: string | undefined } = { rcSmsNumber: "+15550002222" };
+const effectiveText: {
+  rcSmsNumber: string | undefined;
+  rcSmsExtensionId: string | undefined;
+} = { rcSmsNumber: "+15550002222", rcSmsExtensionId: undefined };
 let mockRole = "texting";
+const mockRingcentral: {
+  clientId: string | undefined;
+  clientSecret: string | undefined;
+  jwt: string | undefined;
+} = { clientId: "cid", clientSecret: "csecret", jwt: "jwt" };
 const mockConfig = { rcSmsWebhookToken: "rc-token" };
 const webhookUrl = { value: "https://bot.example.com/webhooks/ringcentral/sms" };
 vi.mock("../config", () => ({
   get config() {
     return mockConfig;
   },
-  resolveEffectiveConfig: vi.fn(async () => ({ text: effectiveText, botRole: mockRole })),
+  resolveEffectiveConfig: vi.fn(async () => ({
+    text: effectiveText,
+    botRole: mockRole,
+    ringcentral: mockRingcentral,
+  })),
   ringcentralSmsWebhookUrl: vi.fn(() => webhookUrl.value),
 }));
 
 const rcGet = vi.fn(async () => ({ records: [] as any[] }));
 const rcPost = vi.fn(async () => ({ id: "sub-new", expirationTime: farFuture() }));
+const rcDelete = vi.fn(async () => undefined);
 vi.mock("../ringcentral/client", () => ({
   rcGet: (...a: any[]) => rcGet(...a),
   rcPost: (...a: any[]) => rcPost(...a),
+  rcDelete: (...a: any[]) => rcDelete(...a),
+}));
+
+// The rc_sms_options read-model write is exercised as a spy; the DB layer itself
+// (delete-then-insert) is covered in smsQueries.rcOptions.test.ts.
+const replaceRcSmsOptions = vi.fn(async () => undefined);
+vi.mock("./smsQueries", () => ({
+  replaceRcSmsOptions: (...a: any[]) => replaceRcSmsOptions(...a),
 }));
 
 vi.mock("../db/remoteConfig", () => ({ BOT_ID: "bot-test" }));
@@ -39,6 +60,7 @@ vi.mock("../logger", () => ({
 import {
   provisionRcSmsSubscription,
   startRcSmsProvisioning,
+  syncRcSmsOptions,
   __stopRcSmsProvisioningForTests,
 } from "./rcProvisioning";
 
@@ -54,11 +76,17 @@ const OUR_ADDRESS = "https://bot.example.com/webhooks/ringcentral/sms";
 beforeEach(() => {
   vi.clearAllMocks();
   effectiveText.rcSmsNumber = "+15550002222";
+  effectiveText.rcSmsExtensionId = undefined;
   mockRole = "texting";
+  mockRingcentral.clientId = "cid";
+  mockRingcentral.clientSecret = "csecret";
+  mockRingcentral.jwt = "jwt";
   mockConfig.rcSmsWebhookToken = "rc-token";
   webhookUrl.value = OUR_ADDRESS;
   rcGet.mockResolvedValue({ records: [] });
   rcPost.mockResolvedValue({ id: "sub-new", expirationTime: farFuture() });
+  rcDelete.mockResolvedValue(undefined);
+  replaceRcSmsOptions.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -197,5 +225,206 @@ describe("startRcSmsProvisioning", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(rcGet).toHaveBeenCalled();
+  });
+});
+
+const AUTHED_EXT_FILTER =
+  "/restapi/v1.0/account/~/extension/~/message-store/instant?type=SMS";
+const CHOSEN_EXT_FILTER =
+  "/restapi/v1.0/account/~/extension/4056789012/message-store/instant?type=SMS";
+
+function existingSub(eventFilters: string[]) {
+  return {
+    id: "sub-1",
+    deliveryMode: { transportType: "WebHook", address: OUR_ADDRESS },
+    eventFilters,
+    expirationTime: farFuture(),
+  };
+}
+
+describe("provisionRcSmsSubscription — follows the chosen extension", () => {
+  it("creates the subscription targeting the chosen extension's message-store", async () => {
+    effectiveText.rcSmsExtensionId = "4056789012";
+    rcGet.mockResolvedValue({ records: [] });
+    await provisionRcSmsSubscription();
+    expect(rcPost).toHaveBeenCalledWith(
+      "/restapi/v1.0/subscription",
+      expect.objectContaining({ eventFilters: [CHOSEN_EXT_FILTER] })
+    );
+  });
+
+  it("recreates (delete + create) when an existing subscription targets a different extension", async () => {
+    effectiveText.rcSmsExtensionId = "4056789012";
+    rcGet.mockResolvedValue({ records: [existingSub([AUTHED_EXT_FILTER])] });
+    await provisionRcSmsSubscription();
+    expect(rcDelete).toHaveBeenCalledWith("/restapi/v1.0/subscription/sub-1");
+    expect(rcPost).toHaveBeenCalledWith(
+      "/restapi/v1.0/subscription",
+      expect.objectContaining({ eventFilters: [CHOSEN_EXT_FILTER] })
+    );
+    // Recreate, not renew.
+    expect(rcPost).not.toHaveBeenCalledWith(
+      "/restapi/v1.0/subscription/sub-1/renew",
+      expect.anything()
+    );
+  });
+
+  it("leaves the subscription alone when it already targets the chosen extension", async () => {
+    effectiveText.rcSmsExtensionId = "4056789012";
+    rcGet.mockResolvedValue({ records: [existingSub([CHOSEN_EXT_FILTER])] });
+    await provisionRcSmsSubscription();
+    expect(rcDelete).not.toHaveBeenCalled();
+    expect(rcPost).not.toHaveBeenCalled();
+  });
+
+  it("does not recreate a legacy (no eventFilters) subscription while still on the authenticated extension", async () => {
+    // rcSmsExtensionId undefined → desired '~'; a sub with no parseable filter
+    // defaults to '~', so it matches and is left healthy.
+    rcGet.mockResolvedValue({
+      records: [
+        {
+          id: "sub-1",
+          deliveryMode: { transportType: "WebHook", address: OUR_ADDRESS },
+          expirationTime: farFuture(),
+        },
+      ],
+    });
+    await provisionRcSmsSubscription();
+    expect(rcDelete).not.toHaveBeenCalled();
+    expect(rcPost).not.toHaveBeenCalled();
+  });
+});
+
+// Distinguish the RC read endpoints the options sync hits.
+function routeRcGet(handlers: {
+  extensionList?: () => any;
+  accountPhones?: () => any;
+  authedExtension?: () => any;
+  authedExtensionPhones?: () => any;
+}) {
+  rcGet.mockImplementation(async (endpoint: string) => {
+    if (endpoint.includes("/extension/~/phone-number")) {
+      return handlers.authedExtensionPhones?.() ?? { records: [] };
+    }
+    if (endpoint.includes("/phone-number")) {
+      return handlers.accountPhones?.() ?? { records: [] };
+    }
+    if (endpoint.includes("/extension?")) {
+      return handlers.extensionList?.() ?? { records: [] };
+    }
+    if (endpoint === "/restapi/v1.0/account/~/extension/~") {
+      return handlers.authedExtension?.() ?? {};
+    }
+    return { records: [] };
+  });
+}
+
+function forbidden() {
+  const err: any = new Error("Forbidden");
+  err.response = { status: 403 };
+  return err;
+}
+
+describe("syncRcSmsOptions", () => {
+  it("account-level happy path: maps SMS-capable numbers to their extension and replaces the read-model", async () => {
+    routeRcGet({
+      extensionList: () => ({
+        records: [
+          { id: 301, name: "Sales", extensionNumber: "101" },
+          { id: 302, name: "Support", extensionNumber: "102" },
+        ],
+      }),
+      accountPhones: () => ({
+        records: [
+          {
+            phoneNumber: "+15550000101",
+            features: ["SmsSender", "MmsSender"],
+            extension: { id: 301 },
+          },
+          {
+            // Voice-only number: no SMS feature → excluded.
+            phoneNumber: "+15550000900",
+            features: ["CallerId"],
+            extension: { id: 302 },
+          },
+          {
+            phoneNumber: "+15550000102",
+            features: ["MmsSender"],
+            extension: { id: 302 },
+          },
+        ],
+      }),
+    });
+
+    await syncRcSmsOptions();
+
+    expect(replaceRcSmsOptions).toHaveBeenCalledTimes(1);
+    const [options] = replaceRcSmsOptions.mock.calls[0] as any[];
+    expect(options).toEqual([
+      {
+        extension_id: "301",
+        extension_name: "Sales",
+        extension_number: "101",
+        phone_number: "+15550000101",
+        sms_enabled: true,
+      },
+      {
+        extension_id: "302",
+        extension_name: "Support",
+        extension_number: "102",
+        phone_number: "+15550000102",
+        sms_enabled: true,
+      },
+    ]);
+  });
+
+  it("403 fallback: syncs just the authenticated extension when the account-level read is forbidden", async () => {
+    routeRcGet({
+      extensionList: () => {
+        throw forbidden();
+      },
+      authedExtension: () => ({ id: 500, name: "My Ext", extensionNumber: "499" }),
+      authedExtensionPhones: () => ({
+        records: [
+          { phoneNumber: "+15550005000", features: ["SmsSender"] },
+          { phoneNumber: "+15550005999", features: ["CallerId"] },
+        ],
+      }),
+    });
+
+    await syncRcSmsOptions();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("403"),
+      expect.objectContaining({ botId: "bot-test" })
+    );
+    expect(replaceRcSmsOptions).toHaveBeenCalledTimes(1);
+    const [options] = replaceRcSmsOptions.mock.calls[0] as any[];
+    expect(options).toEqual([
+      {
+        extension_id: "500",
+        extension_name: "My Ext",
+        extension_number: "499",
+        phone_number: "+15550005000",
+        sms_enabled: true,
+      },
+    ]);
+  });
+
+  it("failed fetch (non-403) preserves old rows: never calls replaceRcSmsOptions", async () => {
+    rcGet.mockRejectedValue(new Error("RC 500"));
+    await expect(syncRcSmsOptions()).resolves.toBeUndefined();
+    expect(replaceRcSmsOptions).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("options sync failed"),
+      expect.objectContaining({ error: "RC 500" })
+    );
+  });
+
+  it("skips (benign) when RingCentral credentials are not configured", async () => {
+    mockRingcentral.jwt = undefined;
+    await syncRcSmsOptions();
+    expect(rcGet).not.toHaveBeenCalled();
+    expect(replaceRcSmsOptions).not.toHaveBeenCalled();
   });
 });

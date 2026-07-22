@@ -1,8 +1,9 @@
 import { config, resolveEffectiveConfig, ringcentralSmsWebhookUrl } from "../config";
 import { logger } from "../logger";
 import { BOT_ID } from "../db/remoteConfig";
-import { rcGet, rcPost } from "../ringcentral/client";
+import { rcGet, rcPost, rcDelete } from "../ringcentral/client";
 import { roleAllows } from "../roles";
+import { replaceRcSmsOptions, type RcSmsOptionInput } from "./smsQueries";
 
 /**
  * RingCentral SMS webhook subscription auto-provisioning + slow renewal poller.
@@ -21,10 +22,36 @@ import { roleAllows } from "../roles";
 
 const SUBSCRIPTION_BASE = "/restapi/v1.0/subscription";
 
-// The message-store instant SMS event filter (extension-scoped ~ = the JWT's own
-// extension). Matches the inbound SMS events our webhook handler parses.
-const SMS_EVENT_FILTER =
-  "/restapi/v1.0/account/~/extension/~/message-store/instant?type=SMS";
+/** Normalize a chosen extension id to a URL segment: blank/undefined → '~'. */
+function extSegment(extensionId: string | undefined): string {
+  return extensionId && extensionId.trim() !== "" ? extensionId.trim() : "~";
+}
+
+/**
+ * The message-store instant SMS event filter for the extension the bot sends as.
+ * `~` targets the JWT's own (authenticated) extension — the pre-PR-G behavior when
+ * no rc_sms_extension_id is configured. Matches the inbound SMS events our webhook
+ * handler parses.
+ */
+function smsEventFilter(extensionId: string | undefined): string {
+  return `/restapi/v1.0/account/~/extension/${extSegment(extensionId)}/message-store/instant?type=SMS`;
+}
+
+/**
+ * The extension a subscription's SMS event filter targets, e.g. '~' or '4056789012'.
+ * Parses the `/extension/{ext}/message-store` segment; defaults to '~' when there is
+ * no parseable SMS message-store filter, so a legacy/opaque subscription isn't
+ * needlessly recreated when the bot is still on the authenticated extension.
+ */
+function subscriptionTargetExtension(sub: any): string {
+  const filters: unknown[] = Array.isArray(sub?.eventFilters) ? sub.eventFilters : [];
+  const smsFilter = filters.find(
+    (f) => typeof f === "string" && f.includes("/message-store/")
+  );
+  if (typeof smsFilter !== "string") return "~";
+  const m = smsFilter.match(/\/extension\/([^/]+)\/message-store/);
+  return m ? m[1] : "~";
+}
 
 // RingCentral requires periodic renewal; max is 604800s (7 days). We request one
 // second under the cap, matching the spec.
@@ -56,7 +83,7 @@ function sameWebhookTarget(candidate: unknown, ours: string): boolean {
 
 /** Whether the SMS gates (role + rc_sms_number + token) are satisfied for this tenant. */
 async function smsProvisioningGate(): Promise<
-  { ok: true; address: string } | { ok: false }
+  { ok: true; address: string; extensionId: string | undefined } | { ok: false }
 > {
   const address = ringcentralSmsWebhookUrl();
   if (!address) {
@@ -82,7 +109,7 @@ async function smsProvisioningGate(): Promise<
     });
     return { ok: false };
   }
-  return { ok: true, address };
+  return { ok: true, address, extensionId: text.rcSmsExtensionId };
 }
 
 /** Find our existing SMS webhook subscription (by matching delivery address), or null. */
@@ -98,10 +125,16 @@ async function findOurSubscription(address: string): Promise<any | null> {
   );
 }
 
-/** Create the SMS webhook subscription pointing RC at our endpoint. */
-async function createSubscription(address: string): Promise<void> {
+/**
+ * Create the SMS webhook subscription pointing RC at our endpoint, targeting the
+ * message-store of the extension the bot sends as (extensionId, or '~' when unset).
+ */
+async function createSubscription(
+  address: string,
+  extensionId: string | undefined
+): Promise<void> {
   const result = await rcPost(SUBSCRIPTION_BASE, {
-    eventFilters: [SMS_EVENT_FILTER],
+    eventFilters: [smsEventFilter(extensionId)],
     deliveryMode: {
       transportType: "WebHook",
       address,
@@ -113,6 +146,7 @@ async function createSubscription(address: string): Promise<void> {
     botId: BOT_ID,
     id: result?.id,
     address,
+    extension: extSegment(extensionId),
     expirationTime: result?.expirationTime,
   });
 }
@@ -148,7 +182,32 @@ export async function provisionRcSmsSubscription(): Promise<void> {
 
     const existing = await findOurSubscription(gate.address);
     if (!existing) {
-      await createSubscription(gate.address);
+      await createSubscription(gate.address, gate.extensionId);
+      return;
+    }
+
+    // The subscription must follow the extension the bot sends as. When the chosen
+    // extension changed (dashboard edit), the old subscription still targets the
+    // previous extension's message-store, so delete + recreate it fresh.
+    const desiredExt = extSegment(gate.extensionId);
+    const currentExt = subscriptionTargetExtension(existing);
+    if (currentExt !== desiredExt) {
+      logger.info("RC SMS subscription targets a different extension; recreating", {
+        botId: BOT_ID,
+        id: existing.id,
+        currentExtension: currentExt,
+        desiredExtension: desiredExt,
+      });
+      try {
+        await rcDelete(`${SUBSCRIPTION_BASE}/${String(existing.id)}`);
+      } catch (err) {
+        logger.warn("Failed to delete stale RC SMS subscription before recreate", {
+          botId: BOT_ID,
+          id: existing.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      await createSubscription(gate.address, gate.extensionId);
       return;
     }
 
@@ -167,7 +226,7 @@ export async function provisionRcSmsSubscription(): Promise<void> {
           id: existing.id,
           error: err instanceof Error ? err.message : String(err),
         });
-        await createSubscription(gate.address);
+        await createSubscription(gate.address, gate.extensionId);
       }
       return;
     }
@@ -193,9 +252,11 @@ export async function provisionRcSmsSubscription(): Promise<void> {
  */
 export function startRcSmsProvisioning(): void {
   void provisionRcSmsSubscription();
+  void syncRcSmsOptions();
   if (pollTimer) return; // never stack pollers
   pollTimer = setInterval(() => {
     void provisionRcSmsSubscription();
+    void syncRcSmsOptions();
   }, POLL_INTERVAL_MS);
   pollTimer.unref();
 }
@@ -205,5 +266,163 @@ export function __stopRcSmsProvisioningForTests(): void {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+}
+
+// ============================================================
+// RC SMS sender OPTIONS sync (read-model for the dashboard dropdowns).
+//
+// Refreshes rc_sms_options from the RC account: the list of enabled User
+// extensions and, per SMS-capable DirectNumber, which extension it belongs to.
+// Runs hourly (piggybacking the subscription poller above) + once at startup.
+// Never throws: any fetch failure is logged and the old rows are left in place
+// (we only replace after a successful fetch). When the RC token lacks
+// account-level read permission (403), we fall back to syncing just the
+// authenticated extension so the dropdown still works single-user.
+// ============================================================
+
+const EXTENSION_LIST =
+  "/restapi/v1.0/account/~/extension?perPage=1000&status=Enabled&type=User";
+const ACCOUNT_PHONE_NUMBERS =
+  "/restapi/v1.0/account/~/phone-number?perPage=1000&usageType=DirectNumber";
+const AUTHED_EXTENSION = "/restapi/v1.0/account/~/extension/~";
+const AUTHED_EXTENSION_PHONE_NUMBERS =
+  "/restapi/v1.0/account/~/extension/~/phone-number?perPage=1000";
+
+interface ExtensionInfo {
+  name: string;
+  number: string;
+}
+
+/** True when a phone-number's `features` array marks it able to send SMS/MMS. */
+function isSmsCapable(features: unknown): boolean {
+  if (!Array.isArray(features)) return false;
+  return features.some((f) => f === "SmsSender" || f === "MmsSender");
+}
+
+/** A RingCentral id coerced to a trimmed string (ids may arrive as number or string). */
+function idString(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+/** True when a RingCentral SDK error is an HTTP 403 (missing account-level permission). */
+function isForbidden(err: unknown): boolean {
+  const status = (err as { response?: { status?: unknown } })?.response?.status;
+  if (status === 403) return true;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return msg.includes("403") || msg.includes("forbidden");
+}
+
+/**
+ * Account-level sync: enumerate enabled User extensions, then map each SMS-capable
+ * DirectNumber to its owning extension's name/number. Throws on any RC API error so
+ * the caller can distinguish a 403 (→ single-extension fallback) from a preserve-old-rows failure.
+ */
+async function fetchAccountLevelOptions(): Promise<RcSmsOptionInput[]> {
+  const extRes = await rcGet(EXTENSION_LIST);
+  const extRecords: any[] = Array.isArray(extRes?.records) ? extRes.records : [];
+  const extById = new Map<string, ExtensionInfo>();
+  for (const e of extRecords) {
+    const id = idString(e?.id);
+    if (id === "") continue;
+    extById.set(id, {
+      name: typeof e?.name === "string" ? e.name : "",
+      number: idString(e?.extensionNumber),
+    });
+  }
+
+  const phoneRes = await rcGet(ACCOUNT_PHONE_NUMBERS);
+  const phoneRecords: any[] = Array.isArray(phoneRes?.records) ? phoneRes.records : [];
+  const options: RcSmsOptionInput[] = [];
+  for (const p of phoneRecords) {
+    if (!isSmsCapable(p?.features)) continue;
+    const phoneNumber = typeof p?.phoneNumber === "string" ? p.phoneNumber : "";
+    if (phoneNumber === "") continue;
+    const extId = idString(p?.extension?.id);
+    const info = extById.get(extId);
+    options.push({
+      extension_id: extId,
+      extension_name: info?.name ?? "",
+      extension_number: info?.number ?? "",
+      phone_number: phoneNumber,
+      sms_enabled: true,
+    });
+  }
+  return options;
+}
+
+/**
+ * Single-extension fallback (used when the account-level read is forbidden): sync
+ * only the authenticated extension and its own SMS-capable numbers, so the dropdown
+ * still works for a single-user app.
+ */
+async function fetchSingleExtensionOptions(): Promise<RcSmsOptionInput[]> {
+  const ext = await rcGet(AUTHED_EXTENSION);
+  const extId = idString(ext?.id);
+  const name = typeof ext?.name === "string" ? ext.name : "";
+  const number = idString(ext?.extensionNumber);
+
+  const phoneRes = await rcGet(AUTHED_EXTENSION_PHONE_NUMBERS);
+  const phoneRecords: any[] = Array.isArray(phoneRes?.records) ? phoneRes.records : [];
+  const options: RcSmsOptionInput[] = [];
+  for (const p of phoneRecords) {
+    if (!isSmsCapable(p?.features)) continue;
+    const phoneNumber = typeof p?.phoneNumber === "string" ? p.phoneNumber : "";
+    if (phoneNumber === "") continue;
+    options.push({
+      extension_id: extId,
+      extension_name: name,
+      extension_number: number,
+      phone_number: phoneNumber,
+      sms_enabled: true,
+    });
+  }
+  return options;
+}
+
+/**
+ * Refresh this bot's rc_sms_options read-model from RingCentral. Never throws:
+ *   - No RC credentials configured → benign skip.
+ *   - Account-level read forbidden (403) → fall back to the authenticated extension
+ *     only and warn (naming the missing permission).
+ *   - Any other fetch failure → log and leave the existing rows in place (we only
+ *     call replaceRcSmsOptions after a successful fetch).
+ */
+export async function syncRcSmsOptions(): Promise<void> {
+  try {
+    const eff = await resolveEffectiveConfig();
+    const rc = eff.ringcentral;
+    if (!rc?.clientId || !rc?.clientSecret || !rc?.jwt) {
+      logger.info("Skipping RC SMS options sync: RingCentral credentials not configured", {
+        botId: BOT_ID,
+      });
+      return;
+    }
+
+    let options: RcSmsOptionInput[];
+    try {
+      options = await fetchAccountLevelOptions();
+    } catch (err) {
+      if (isForbidden(err)) {
+        logger.warn(
+          "RC SMS options: account-level read forbidden (403). The RingCentral app " +
+            "lacks the 'Read Accounts' (account-level extension/phone-number read) " +
+            "permission; falling back to the authenticated extension only.",
+          { botId: BOT_ID }
+        );
+        options = await fetchSingleExtensionOptions();
+      } else {
+        throw err;
+      }
+    }
+
+    await replaceRcSmsOptions(options);
+    logger.info("RC SMS sender options synced", { botId: BOT_ID, count: options.length });
+  } catch (err) {
+    // Never fatal, and never wipe: the old rows stay until a fetch succeeds.
+    logger.error("RC SMS options sync failed (old rows left in place)", {
+      botId: BOT_ID,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
