@@ -143,7 +143,7 @@ describe("provisionRcSmsSubscription — create / idempotence / renewal", () => 
       deliveryMode: {
         transportType: "WebHook",
         address: OUR_ADDRESS,
-        verificationToken: "rc-token",
+        validationToken: "rc-token",
       },
       expiresIn: 604799,
     });
