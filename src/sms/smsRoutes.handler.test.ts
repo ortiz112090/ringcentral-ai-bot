@@ -29,6 +29,8 @@ vi.mock("./smsService", () => ({
 }));
 
 import { handleSmsWebhook, handleTextOutreach } from "./smsRoutes";
+import { loadRemoteConfig } from "../db/remoteConfig";
+import { resolveEffectiveConfig } from "../config";
 
 function fakeReq(opts: {
   headers?: Record<string, string>;
@@ -183,6 +185,18 @@ describe("handleTextOutreach (shared-secret auth)", () => {
     );
     expect(res.statusCode).toBe(403);
     expect(sendWebLeadText).not.toHaveBeenCalled();
+  });
+
+  it("refreshes remote config before resolving effective config (fresh per call)", async () => {
+    const res = fakeRes();
+    await handleTextOutreach(
+      fakeReq({ headers: auth, body: { phone: "+15557778888" }, params: botParams }),
+      res
+    );
+    expect(loadRemoteConfig).toHaveBeenCalled();
+    const loadOrder = (loadRemoteConfig as any).mock.invocationCallOrder[0];
+    const resolveOrder = (resolveEffectiveConfig as any).mock.invocationCallOrder[0];
+    expect(loadOrder).toBeLessThan(resolveOrder);
   });
 
   it("202 and fires the web-lead outreach on a valid authenticated request", async () => {
