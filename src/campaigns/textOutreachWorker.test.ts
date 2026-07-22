@@ -51,12 +51,14 @@ const claimPendingContacts = vi.fn(async () => [] as any[]);
 const countPendingContacts = vi.fn(async () => 0);
 const setContactStatus = vi.fn(async () => {});
 const completeCampaign = vi.fn(async () => {});
+const getNewestAttemptedAt = vi.fn(async () => null as Date | null);
 vi.mock("./campaignQueries", () => ({
   getRunningCampaigns: (...a: any[]) => getRunningCampaigns(...a),
   claimPendingContacts: (...a: any[]) => claimPendingContacts(...a),
   countPendingContacts: (...a: any[]) => countPendingContacts(...a),
   setContactStatus: (...a: any[]) => setContactStatus(...a),
   completeCampaign: (...a: any[]) => completeCampaign(...a),
+  getNewestAttemptedAt: (...a: any[]) => getNewestAttemptedAt(...a),
 }));
 
 import {
@@ -76,6 +78,7 @@ const campaign = {
   status: "running" as const,
   pace_per_hour: 120,
   dc_recording_id: null,
+  send_delay_minutes: null as number | null,
 };
 
 function contact(id: number, firstName: string | null = "Ann", phone = "+1555000" + String(1000 + id)) {
@@ -104,6 +107,7 @@ beforeEach(() => {
   getActiveOutreachTemplates.mockResolvedValue([...templates]);
   findConversationByPhone.mockResolvedValue(null);
   sendSms.mockResolvedValue({ sent: true });
+  getNewestAttemptedAt.mockResolvedValue(null);
 });
 
 describe("personalizeTemplate", () => {
@@ -302,5 +306,71 @@ describe("runTextOutreachTick gates", () => {
     await runTextOutreachTick(noon);
     expect(getRunningCampaigns).not.toHaveBeenCalled();
     expect(claimPendingContacts).not.toHaveBeenCalled();
+  });
+});
+
+describe("processTextOutreachCampaign send_delay_minutes", () => {
+  const ctx = { channel: "twilio" as const, templates };
+  const now = new Date("2026-07-21T12:00:00Z");
+  const delayed = { ...campaign, send_delay_minutes: 30 };
+
+  it("sends nothing when the newest attempt is more recent than the delay", async () => {
+    // Attempt 10 minutes ago; delay is 30 → still spacing, hold this tick.
+    getNewestAttemptedAt.mockResolvedValueOnce(new Date("2026-07-21T11:50:00Z"));
+    await processTextOutreachCampaign(delayed, ctx, now);
+    expect(claimPendingContacts).not.toHaveBeenCalled();
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("sends EXACTLY ONE once the delay has elapsed", async () => {
+    // Attempt 31 minutes ago; delay is 30 → elapsed, claim at most one.
+    getNewestAttemptedAt.mockResolvedValueOnce(new Date("2026-07-21T11:29:00Z"));
+    claimPendingContacts.mockResolvedValueOnce([contact(1)]);
+    await processTextOutreachCampaign(delayed, ctx, now);
+    expect(claimPendingContacts).toHaveBeenCalledWith("camp-1", 1);
+    expect(claimPendingContacts).toHaveBeenCalledTimes(1);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(setContactStatus).toHaveBeenCalledWith(1, "sent", "delivered_attempt");
+  });
+
+  it("sends one immediately when there are no attempts yet", async () => {
+    getNewestAttemptedAt.mockResolvedValueOnce(null);
+    claimPendingContacts.mockResolvedValueOnce([contact(1)]);
+    await processTextOutreachCampaign(delayed, ctx, now);
+    expect(claimPendingContacts).toHaveBeenCalledWith("camp-1", 1);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps a delayed campaign at one send even when pace_per_hour is high", async () => {
+    // pace_per_hour 120 would claim 2 on the pace path; delay caps it at 1.
+    getNewestAttemptedAt.mockResolvedValueOnce(null);
+    claimPendingContacts.mockResolvedValueOnce([contact(1)]);
+    await processTextOutreachCampaign({ ...delayed, pace_per_hour: 120 }, ctx, now);
+    expect(claimPendingContacts).toHaveBeenCalledWith("camp-1", 1);
+  });
+
+  it("treats a 'skipped' (opt-out) attempt as the newest attempt for spacing", async () => {
+    // The opted-out contact's skip is the newest attempt 5 min ago → still spacing.
+    getNewestAttemptedAt.mockResolvedValueOnce(new Date("2026-07-21T11:55:00Z"));
+    await processTextOutreachCampaign(delayed, ctx, now);
+    expect(getNewestAttemptedAt).toHaveBeenCalledWith("camp-1");
+    expect(claimPendingContacts).not.toHaveBeenCalled();
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("completes the delayed campaign when the delay elapsed but no pending remain", async () => {
+    getNewestAttemptedAt.mockResolvedValueOnce(new Date("2026-07-21T11:00:00Z"));
+    claimPendingContacts.mockResolvedValueOnce([]);
+    countPendingContacts.mockResolvedValueOnce(0);
+    await processTextOutreachCampaign(delayed, ctx, now);
+    expect(completeCampaign).toHaveBeenCalledWith("camp-1");
+  });
+
+  it("null delay leaves the pace path untouched (no spacing query, full batch)", async () => {
+    claimPendingContacts.mockResolvedValueOnce([contact(1), contact(2)]);
+    await processTextOutreachCampaign(campaign, ctx, now);
+    expect(getNewestAttemptedAt).not.toHaveBeenCalled();
+    expect(claimPendingContacts).toHaveBeenCalledWith("camp-1", 2); // ceil(120/60)
+    expect(sendSms).toHaveBeenCalledTimes(2);
   });
 });

@@ -27,6 +27,7 @@ export interface CampaignRow {
   status: CampaignStatus;
   pace_per_hour: number;
   dc_recording_id: string | null;
+  send_delay_minutes: number | null;
 }
 
 export interface CampaignContactRow {
@@ -61,7 +62,9 @@ export async function getRunningCampaigns(
 ): Promise<CampaignRow[]> {
   const { data, error } = await supabase
     .from("campaigns")
-    .select("id, bot_id, name, campaign_type, status, pace_per_hour, dc_recording_id")
+    .select(
+      "id, bot_id, name, campaign_type, status, pace_per_hour, dc_recording_id, send_delay_minutes"
+    )
     .eq("bot_id", botId)
     .eq("campaign_type", campaignType)
     .eq("status", "running");
@@ -85,6 +88,35 @@ export async function countPendingContacts(campaignId: string): Promise<number> 
     return 0;
   }
   return count ?? 0;
+}
+
+/**
+ * Newest attempt time among a campaign's contacts, where an "attempt" is any contact
+ * in a terminal-ish attempted state (sent / skipped / failed — opt-out 'skipped'
+ * counts, keeping send-delay spacing honest). Returns null when there are no attempts
+ * yet (or on error — failure-tolerant, so the caller simply treats it as "no attempts"
+ * and the tick stays never-throwing). Campaign- and bot-scoped.
+ */
+export async function getNewestAttemptedAt(
+  campaignId: string,
+  botId: string = BOT_ID
+): Promise<Date | null> {
+  const { data, error } = await supabase
+    .from("campaign_contacts")
+    .select("attempted_at")
+    .eq("bot_id", botId)
+    .eq("campaign_id", campaignId)
+    .in("status", ["sent", "skipped", "failed"])
+    .not("attempted_at", "is", null)
+    .order("attempted_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    logger.error("Failed to read newest attempted_at", { campaignId, error: error.message });
+    return null;
+  }
+  const ts = (data as { attempted_at: string | null } | null)?.attempted_at ?? null;
+  return ts ? new Date(ts) : null;
 }
 
 /**

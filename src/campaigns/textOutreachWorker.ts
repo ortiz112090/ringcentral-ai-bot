@@ -17,6 +17,7 @@ import {
   claimPendingContacts,
   completeCampaign,
   countPendingContacts,
+  getNewestAttemptedAt,
   getRunningCampaigns,
   setContactStatus,
   type CampaignContactRow,
@@ -105,18 +106,34 @@ async function upsertOutreachConversation(
 }
 
 /**
- * Process ONE running text_outreach campaign for this tick: claim a paced batch and
- * send each contact its randomized first message. Assumes the role/quiet-hours gates
- * and the tenant channel + template gates already passed (channel + templates are
- * passed in). Never throws — one bad contact is isolated so the rest proceed. A
- * per-contact send/config problem leaves that contact PENDING (retried next tick),
- * never failed.
+ * Process ONE running text_outreach campaign for this tick: claim a batch and send
+ * each contact its randomized first message. Assumes the role/quiet-hours gates and
+ * the tenant channel + template gates already passed (channel + templates are passed
+ * in). Never throws — one bad contact is isolated so the rest proceed. A per-contact
+ * send/config problem leaves that contact PENDING (retried next tick), never failed.
+ *
+ * Send spacing:
+ *   - send_delay_minutes set (>=1): claim AT MOST ONE contact, and only when the
+ *     campaign's newest attempt (sent/skipped/failed — opt-outs count) is older than
+ *     the delay, or there are no attempts yet. Otherwise send nothing this tick.
+ *   - null: the existing pace_per_hour batch behavior, completely unchanged.
  */
 export async function processTextOutreachCampaign(
   campaign: CampaignRow,
-  ctx: { channel: TextChannel; templates: TextOutreachTemplateRow[] }
+  ctx: { channel: TextChannel; templates: TextOutreachTemplateRow[] },
+  now: Date = new Date()
 ): Promise<void> {
-  const batch = await claimPendingContacts(campaign.id, pacePerTick(campaign.pace_per_hour));
+  const delay = campaign.send_delay_minutes;
+  const delayed = typeof delay === "number" && delay >= 1;
+
+  if (delayed) {
+    // Spacing gate: hold this tick if the newest attempt is more recent than the delay.
+    const newest = await getNewestAttemptedAt(campaign.id);
+    if (newest && now.getTime() - newest.getTime() < delay * 60_000) return;
+  }
+
+  const limit = delayed ? 1 : pacePerTick(campaign.pace_per_hour);
+  const batch = await claimPendingContacts(campaign.id, limit);
   if (batch.length === 0) {
     const remaining = await countPendingContacts(campaign.id);
     if (remaining === 0) {
@@ -242,7 +259,7 @@ export async function runTextOutreachTick(now: Date = new Date()): Promise<void>
 
     const campaigns = await getRunningCampaigns("text_outreach");
     for (const campaign of campaigns) {
-      await processTextOutreachCampaign(campaign, { channel, templates });
+      await processTextOutreachCampaign(campaign, { channel, templates }, now);
     }
   } catch (err) {
     logger.error("Text-outreach tick failed unexpectedly", {
