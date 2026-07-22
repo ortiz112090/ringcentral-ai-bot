@@ -80,6 +80,33 @@ export async function getTextStages(botId: string = BOT_ID): Promise<TextStageRo
   return (data as TextStageRow[]) ?? [];
 }
 
+/** An ACTIVE text-outreach first-message template (text_outreach_templates). */
+export interface TextOutreachTemplateRow {
+  id: string;
+  template_text: string;
+}
+
+/**
+ * Read this bot's ACTIVE text-outreach templates (text_outreach_templates). The
+ * outreach worker picks one uniformly at random per contact for the first message.
+ * Failure-tolerant: on any error returns [] so the worker simply leaves contacts
+ * pending this tick (an operator config gap, never a hard failure).
+ */
+export async function getActiveOutreachTemplates(
+  botId: string = BOT_ID
+): Promise<TextOutreachTemplateRow[]> {
+  const { data, error } = await supabase
+    .from("text_outreach_templates")
+    .select("id, template_text")
+    .eq("bot_id", botId)
+    .eq("active", true);
+  if (error) {
+    logger.error("Failed to load text outreach templates", { botId, error: error.message });
+    return [];
+  }
+  return (data as TextOutreachTemplateRow[]) ?? [];
+}
+
 /**
  * Find the most recent conversation for a phone number on this bot, or null. Used
  * to continue an existing thread (inbound) and to enforce opt-out before any

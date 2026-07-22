@@ -30,7 +30,9 @@ export type Feature =
   /** The outbound-calling campaign runner (PR B). */
   | "campaign_calls"
   /** The Drop Cowboy ringless-voicemail campaign runner (PR A). */
-  | "campaign_rvm";
+  | "campaign_rvm"
+  /** The text-outreach campaign runner (PR E). */
+  | "campaign_texts";
 
 /** The default role when bot_config.bot_role is unset/blank/unknown. */
 export const DEFAULT_BOT_ROLE: BotRole = "answer_calls";
@@ -73,6 +75,8 @@ export function roleAllows(role: BotRole, feature: Feature): boolean {
       return role === "outbound_calls";
     case "campaign_rvm":
       return role === "answer_and_followup";
+    case "campaign_texts":
+      return role === "texting";
     default:
       return false;
   }
