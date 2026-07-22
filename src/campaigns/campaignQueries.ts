@@ -9,7 +9,7 @@ import { BOT_ID } from "../db/remoteConfig";
  * never kills a worker tick. Tables live in migration 0010_campaigns.sql.
  */
 
-export type CampaignType = "outbound_calls" | "voicemail_drops";
+export type CampaignType = "outbound_calls" | "voicemail_drops" | "text_outreach";
 export type CampaignStatus = "draft" | "running" | "paused" | "completed";
 export type ContactStatus =
   | "pending"

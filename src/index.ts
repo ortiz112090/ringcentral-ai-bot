@@ -10,6 +10,7 @@ import { startRvmWorker } from "./campaigns/rvmWorker";
 import { outboundVoiceRouter } from "./campaigns/outboundRoutes";
 import { startOutboundWorker } from "./campaigns/outboundWorker";
 import { startAnalyzerWorker } from "./learning/analyzer";
+import { startTextOutreachWorker } from "./campaigns/textOutreachWorker";
 import { attachTwilioMediaStream } from "./twilio/mediaStream";
 import { provisionTextNumber, provisionTwilioNumber } from "./twilio/provisioning";
 import { startRcSmsProvisioning } from "./sms/rcProvisioning";
@@ -118,6 +119,8 @@ async function main(): Promise<void> {
   // Daily script-suggestion analyzer. Self-gates on the texting role + "nothing new";
   // inserts only PENDING suggestions (dashboard-approved), never edits the live script.
   startAnalyzerWorker();
+
+  startTextOutreachWorker();
 
   const shutdown = (signal: string) => {
     logger.info("Shutting down", { signal });
