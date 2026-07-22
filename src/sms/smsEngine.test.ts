@@ -114,6 +114,19 @@ describe("runSmsTurn", () => {
     expect(res.optedOut).toBe(true);
   });
 
+  it("sets declined (not optedOut) and captures nothing when the model calls mark_not_interested", async () => {
+    create
+      .mockResolvedValueOnce(toolResponse("mark_not_interested", {}))
+      .mockResolvedValueOnce(textResponse("No problem — thanks for your time!"));
+    const res = await runSmsTurn(baseInput);
+    expect(res.declined).toBe(true);
+    expect(res.optedOut).toBe(false);
+    expect(res.captured).toEqual({});
+    expect(res.reply).toBe("No problem — thanks for your time!");
+    expect(mergeConversationCapturedData).not.toHaveBeenCalled();
+    expect(upsertLead).not.toHaveBeenCalled();
+  });
+
   it("never throws — a model/API failure yields a safe escalation", async () => {
     create.mockRejectedValueOnce(new Error("429 rate limited"));
     const res = await runSmsTurn(baseInput);

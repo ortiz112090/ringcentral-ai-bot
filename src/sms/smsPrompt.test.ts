@@ -66,6 +66,15 @@ describe("buildSmsSystemPrompt — script discipline", () => {
     expect(p).toContain("escalate_to_human");
     expect(p).toContain("mark_opted_out");
   });
+
+  it("includes the INTEREST GATE rule and the mark_not_interested tool", () => {
+    const p = buildSmsSystemPrompt(baseArgs);
+    expect(p).toMatch(/INTEREST GATE/);
+    expect(p).toMatch(/very first reply must be classified/i);
+    expect(p).toMatch(/mark_not_interested/);
+    // Ambiguous replies get one clarifying question, not an assumption.
+    expect(p).toMatch(/ask ONE brief clarifying question/i);
+  });
 });
 
 describe("buildSmsSystemPrompt — data-driven behavior", () => {

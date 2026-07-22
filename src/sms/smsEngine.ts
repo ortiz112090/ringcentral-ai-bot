@@ -32,6 +32,8 @@ export interface SmsTurnResult {
   escalate: boolean;
   /** True when the model called mark_opted_out this turn. */
   optedOut: boolean;
+  /** True when the model called mark_not_interested this turn (interest gate: negative first reply). */
+  declined: boolean;
   /** Validated lead keys captured this turn (already merged/persisted). */
   captured: Record<string, unknown>;
 }
@@ -67,6 +69,15 @@ const STATIC_TOOLS: ChatCompletionTool[] = [
       name: "mark_opted_out",
       description:
         "Call ONLY when the lead clearly asks to stop being texted / opt out.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mark_not_interested",
+      description:
+        "Call this when the lead's reply clearly signals they are not interested, don't need this, don't want a follow-up, or otherwise decline to proceed — but did NOT explicitly ask to stop being texted (use mark_opted_out for that instead).",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -108,6 +119,7 @@ export async function runSmsTurn(input: {
     reply: "",
     escalate: false,
     optedOut: false,
+    declined: false,
     captured: {},
   };
 
@@ -176,6 +188,7 @@ export async function runSmsTurn(input: {
       reply: ESCALATION_FALLBACK_LINE,
       escalate: true,
       optedOut: false,
+      declined: false,
       captured: {},
     };
   }
@@ -203,6 +216,10 @@ async function executeToolCall(
   }
   if (name === "mark_opted_out") {
     result.optedOut = true;
+    return { ok: true };
+  }
+  if (name === "mark_not_interested") {
+    result.declined = true;
     return { ok: true };
   }
   if (name === "capture_lead_info") {
