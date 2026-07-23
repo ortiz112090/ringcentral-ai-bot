@@ -76,7 +76,8 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * True when two webhook delivery addresses point at the same service endpoint (same
  * host + path); query string / protocol differences are ignored. Falls back to exact
- * string equality when either value isn't a parseable URL.
+ * string equality when either value isn't a parseable URL. Used to recognize any
+ * subscription (current or stale, tokenized or bare) that targets OUR webhook path.
  */
 function sameWebhookTarget(candidate: unknown, ours: string): boolean {
   if (typeof candidate !== "string" || candidate === "") return false;
@@ -87,6 +88,29 @@ function sameWebhookTarget(candidate: unknown, ours: string): boolean {
   } catch {
     return candidate === ours;
   }
+}
+
+/**
+ * True when a delivery address is EXACTLY our current address — same host, path, AND
+ * query string (the `?token=` matters). The bare pre-token address shares our host +
+ * path but has no query, so it is NOT exact and is treated as stale. Falls back to
+ * strict string equality when either value isn't a parseable URL.
+ */
+function isExactWebhookAddress(candidate: unknown, ours: string): boolean {
+  if (typeof candidate !== "string" || candidate === "") return false;
+  try {
+    const a = new URL(candidate);
+    const b = new URL(ours);
+    return a.host === b.host && a.pathname === b.pathname && a.search === b.search;
+  } catch {
+    return candidate === ours;
+  }
+}
+
+/** Address with its query string stripped — safe to log (never leaks the token). */
+function addressForLog(address: string): string {
+  const q = address.indexOf("?");
+  return q === -1 ? address : address.slice(0, q);
 }
 
 /** Whether the SMS gates (role + rc_sms_number + token) are satisfied for this tenant. */
@@ -120,17 +144,31 @@ async function smsProvisioningGate(): Promise<
   return { ok: true, address, extensionId: text.rcSmsExtensionId };
 }
 
-/** Find our existing SMS webhook subscription (by matching delivery address), or null. */
-async function findOurSubscription(address: string): Promise<any | null> {
+/**
+ * Enumerate our webhook subscriptions, splitting them into:
+ *   - current: the one whose address EXACTLY matches ours (host + path + `?token=`),
+ *     or null when none matches (e.g. only the bare pre-token address exists).
+ *   - staleIds: any OTHER subscription pointing at our webhook path (same host+path)
+ *     that is NOT the exact current address — e.g. the old bare-URL subscription, or
+ *     one carrying a rotated token. These get deleted after a fresh one is live.
+ */
+async function findOurSubscription(
+  address: string
+): Promise<{ current: any | null; staleIds: string[] }> {
   const res = await rcGet(SUBSCRIPTION_BASE);
   const records: any[] = Array.isArray(res?.records) ? res.records : [];
-  return (
-    records.find(
-      (sub) =>
-        sub?.deliveryMode?.transportType === "WebHook" &&
-        sameWebhookTarget(sub?.deliveryMode?.address, address)
-    ) ?? null
-  );
+  let current: any | null = null;
+  const staleIds: string[] = [];
+  for (const sub of records) {
+    if (sub?.deliveryMode?.transportType !== "WebHook") continue;
+    const addr = sub?.deliveryMode?.address;
+    if (isExactWebhookAddress(addr, address)) {
+      current = sub;
+    } else if (sameWebhookTarget(addr, address) && sub?.id != null) {
+      staleIds.push(String(sub.id));
+    }
+  }
+  return { current, staleIds };
 }
 
 /**
@@ -153,7 +191,7 @@ async function createSubscription(
   logger.info("RingCentral SMS webhook subscription created", {
     botId: BOT_ID,
     id: result?.id,
-    address,
+    address: addressForLog(address),
     extension: extSegment(extensionId),
     expirationTime: result?.expirationTime,
   });
@@ -214,22 +252,22 @@ async function deleteStaleSubscription(id: string): Promise<void> {
  * logs it and does not retry.
  *
  * Safer-ordering guarantee: a replacement is only created here; the caller's stale
- * subscription (staleSubscriptionId) is deleted ONLY after this create succeeds, so
- * we never land in the "deleted the working subscription but failed to recreate" dead
- * state — even when success only happens on a later retry.
+ * subscriptions (staleSubscriptionIds) are deleted ONLY after this create succeeds,
+ * so we never land in the "deleted the working subscription but failed to recreate"
+ * dead state — even when success only happens on a later retry.
  */
 async function createSubscriptionWithRetry(
   address: string,
   extensionId: string | undefined,
-  staleSubscriptionId?: string,
+  staleSubscriptionIds: string[] = [],
   attempt = 0
 ): Promise<void> {
   try {
     await createSubscription(address, extensionId);
-    if (staleSubscriptionId) {
-      // Create-then-delete: the new subscription is live, so removing the old one
-      // now can never leave the tenant without a working subscription.
-      await deleteStaleSubscription(staleSubscriptionId);
+    // Create-then-delete: the new subscription is live, so removing the old ones
+    // now can never leave the tenant without a working subscription.
+    for (const id of staleSubscriptionIds) {
+      await deleteStaleSubscription(id);
     }
   } catch (err) {
     const detail = await extractRcErrorDetail(err);
@@ -245,7 +283,7 @@ async function createSubscriptionWithRetry(
         errorCode: detail?.errorCode,
       });
       const timer = setTimeout(() => {
-        void createSubscriptionWithRetry(address, extensionId, staleSubscriptionId, attempt + 1);
+        void createSubscriptionWithRetry(address, extensionId, staleSubscriptionIds, attempt + 1);
       }, delayMs);
       timer.unref?.();
       return;
@@ -299,10 +337,23 @@ export async function provisionRcSmsSubscription(): Promise<void> {
     const gate = await smsProvisioningGate();
     if (!gate.ok) return;
 
-    const existing = await findOurSubscription(gate.address);
+    const { current: existing, staleIds } = await findOurSubscription(gate.address);
+
     if (!existing) {
-      await createSubscriptionWithRetry(gate.address, gate.extensionId);
+      // No exact-address match (e.g. only the old bare-URL subscription exists).
+      // Create the tokenized subscription, then delete the stale ones only after the
+      // new one is live (create-then-delete), so inbound replies keep flowing during
+      // the swap and RC never blacklists us for a delivery gap.
+      await createSubscriptionWithRetry(gate.address, gate.extensionId, staleIds);
       return;
+    }
+
+    // Our exact subscription is already live, so any stale ones (bare/rotated-token
+    // addresses pointing at the same path) can be deleted right now — the current
+    // subscription keeps serving. Leaving them would let the old address keep
+    // hammering us with 403s until RC blacklists the subscription.
+    for (const id of staleIds) {
+      await deleteStaleSubscription(id);
     }
 
     // The subscription must follow the extension the bot sends as. Only recreate on a
@@ -324,7 +375,7 @@ export async function provisionRcSmsSubscription(): Promise<void> {
       // Create-then-delete (Fix 3): the old subscription is removed only after the
       // replacement is confirmed created (inside createSubscriptionWithRetry), so a
       // failed/retrying create never leaves us with no subscription.
-      await createSubscriptionWithRetry(gate.address, gate.extensionId, String(existing.id));
+      await createSubscriptionWithRetry(gate.address, gate.extensionId, [String(existing.id)]);
       return;
     }
 
@@ -348,7 +399,7 @@ export async function provisionRcSmsSubscription(): Promise<void> {
         });
         // Recreate with the same safe ordering + SUB-521 retry; delete the stale
         // subscription only after the replacement is live.
-        await createSubscriptionWithRetry(gate.address, gate.extensionId, String(existing.id));
+        await createSubscriptionWithRetry(gate.address, gate.extensionId, [String(existing.id)]);
       }
       return;
     }

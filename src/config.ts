@@ -352,10 +352,19 @@ export function twilioSmsWebhookUrl(): string {
  * webhook). Used both as the subscription's deliveryMode.address when provisioning
  * and to match an existing subscription as ours. Returns "" when PUBLIC_BASE_URL
  * is unset so provisioning can skip rather than register a broken address.
+ *
+ * The shared secret rides in the address as a `?token=` query param: RC does NOT
+ * send a Verification-Token header on delivered notifications, but it echoes the
+ * full subscription address (query included) on every delivery, so the token in
+ * the URL is what the handler authenticates against. When the token is unset the
+ * bare URL is returned (and the handler fails closed with 503).
  */
 export function ringcentralSmsWebhookUrl(): string {
   const base = publicBase();
-  return base ? `${base}/webhooks/ringcentral/sms` : "";
+  if (!base) return "";
+  const url = `${base}/webhooks/ringcentral/sms`;
+  const token = config.rcSmsWebhookToken.trim();
+  return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }
 
 /**
