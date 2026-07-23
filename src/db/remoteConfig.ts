@@ -132,7 +132,7 @@ export interface BotConfigRow {
   bot_role: string | null;
 }
 
-/** credentials keyed by provider name (e.g. "ringcentral", "openai-tts"). */
+/** credentials keyed by provider name (e.g. "ringcentral", "openai"). */
 export type CredentialsMap = Record<string, Record<string, unknown>>;
 
 export interface RemoteConfig {
