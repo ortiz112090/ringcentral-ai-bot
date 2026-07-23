@@ -364,7 +364,7 @@ export async function ensureWebhookSubscription(deliveryAddress: string): Promis
         transportType: "WebHook",
         address: deliveryAddress,
         ...(config.ringcentral.webhookVerificationToken
-          ? { verificationToken: config.ringcentral.webhookVerificationToken }
+          ? { validationToken: config.ringcentral.webhookVerificationToken }
           : {}),
       },
       expiresIn: 604800, // 7 days; RingCentral requires periodic renewal.

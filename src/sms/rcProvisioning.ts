@@ -138,7 +138,7 @@ async function createSubscription(
     deliveryMode: {
       transportType: "WebHook",
       address,
-      verificationToken: config.rcSmsWebhookToken.trim(),
+      validationToken: config.rcSmsWebhookToken.trim(),
     },
     expiresIn: EXPIRES_IN,
   });

@@ -67,7 +67,7 @@ export const config = {
 
   // Verification token guarding the RingCentral SMS webhook
   // (POST /webhooks/ringcentral/sms). Set on the RC webhook subscription's
-  // deliveryMode.verificationToken; RC echoes it in the Verification-Token header
+  // deliveryMode.validationToken; RC echoes it in the Verification-Token header
   // on every delivered event. When unset the webhook fails closed (503) rather
   // than process unauthenticated payloads.
   rcSmsWebhookToken: optional("RC_SMS_WEBHOOK_TOKEN", ""),
