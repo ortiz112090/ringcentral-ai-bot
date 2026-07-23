@@ -150,6 +150,51 @@ export async function findOrCreateVelocifyCampaign(
   return (created as CampaignRow) ?? null;
 }
 
+/** Human date+time label for a manual-pull campaign name, e.g. "Jul 23, 2:15 PM". */
+function formatManualCampaignLabel(now: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(now);
+}
+
+/**
+ * ALWAYS insert a fresh 'Velocify Manual — <date+time>' text_outreach campaign in
+ * status "draft" (NOT running) — the manual pull lands in its own campaign that waits
+ * for the dashboard Start button before the worker sends anything. Unlike
+ * findOrCreateVelocifyCampaign this never reuses a prior row. Returns the created
+ * CampaignRow, or null on error so the caller inserts nothing this run.
+ */
+export async function createManualVelocifyCampaign(
+  pacePerHour: number,
+  now: Date = new Date(),
+  botId: string = BOT_ID
+): Promise<CampaignRow | null> {
+  const name = `Velocify Manual — ${formatManualCampaignLabel(now)}`;
+  const { data: created, error: insErr } = await supabase
+    .from("campaigns")
+    .insert({
+      bot_id: botId,
+      name,
+      campaign_type: "text_outreach",
+      status: "draft",
+      pace_per_hour: pacePerHour,
+    })
+    .select(
+      "id, bot_id, name, campaign_type, status, pace_per_hour, dc_recording_id, send_delay_minutes"
+    )
+    .maybeSingle();
+  if (insErr) {
+    logger.error("Velocify: failed to create manual campaign", { error: insErr.message });
+    return null;
+  }
+  return (created as CampaignRow) ?? null;
+}
+
 /**
  * Insert the given contacts as PENDING campaign_contacts for the campaign, in chunks.
  * Returns the number of rows successfully inserted. Failure-tolerant: a chunk error is

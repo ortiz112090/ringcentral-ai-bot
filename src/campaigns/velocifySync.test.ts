@@ -33,12 +33,24 @@ const findOrCreateVelocifyCampaign = vi.fn(async (_pace: number) => ({
   dc_recording_id: null,
   send_delay_minutes: null,
 }));
+let manualCampaignSeq = 0;
+const createManualVelocifyCampaign = vi.fn(async (pace: number, now: Date) => ({
+  id: `camp-manual-${++manualCampaignSeq}`,
+  bot_id: "00000000-0000-0000-0000-000000000001",
+  name: `Velocify Manual — ${now.toISOString()}`,
+  campaign_type: "text_outreach",
+  status: "draft",
+  pace_per_hour: pace,
+  dc_recording_id: null,
+  send_delay_minutes: null,
+}));
 const getKnownCampaignContactPhones = vi.fn(async (_p: string[]) => new Set<string>());
 const getKnownConversationPhones = vi.fn(async (_p: string[]) => new Set<string>());
 const insertPendingContacts = vi.fn(async (_id: string, contacts: any[]) => contacts.length);
 const updateVelocifyLastSyncedAt = vi.fn(async () => {});
 vi.mock("./velocifyQueries", () => ({
   VELOCIFY_CAMPAIGN_NAME: "Velocify Report Sync",
+  createManualVelocifyCampaign: (...a: any[]) => createManualVelocifyCampaign(...(a as [number, Date])),
   findOrCreateVelocifyCampaign: (...a: any[]) => findOrCreateVelocifyCampaign(...(a as [number])),
   getKnownCampaignContactPhones: (...a: any[]) => getKnownCampaignContactPhones(...(a as [string[]])),
   getKnownConversationPhones: (...a: any[]) => getKnownConversationPhones(...(a as [string[]])),
@@ -95,6 +107,17 @@ beforeEach(() => {
   getKnownCampaignContactPhones.mockResolvedValue(new Set());
   getKnownConversationPhones.mockResolvedValue(new Set());
   insertPendingContacts.mockImplementation(async (_id: string, contacts: any[]) => contacts.length);
+  manualCampaignSeq = 0;
+  createManualVelocifyCampaign.mockImplementation(async (pace: number, now: Date) => ({
+    id: `camp-manual-${++manualCampaignSeq}`,
+    bot_id: "00000000-0000-0000-0000-000000000001",
+    name: `Velocify Manual — ${now.toISOString()}`,
+    campaign_type: "text_outreach",
+    status: "draft",
+    pace_per_hour: pace,
+    dc_recording_id: null,
+    send_delay_minutes: null,
+  }));
 });
 
 // ---- A realistic GetReportResults fixture. Uses a namespace-prefixed inner element
@@ -494,6 +517,75 @@ describe("runSync happy path (find-or-create + dedupe + insert)", () => {
     expect(res.accepted).toBe(true);
     expect(res.counts?.added).toBe(0);
     expect(insertPendingContacts).not.toHaveBeenCalled();
+  });
+});
+
+describe("runSync manual pull (brand-new draft campaign each call)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, text: async () => FIXTURE_XML })));
+  });
+
+  it("creates a fresh draft campaign, inserts survivors there, and returns its id/name", async () => {
+    const now = new Date("2026-07-23T21:15:00Z");
+    const res = await runSync(now, { manual: true });
+    expect(res.accepted).toBe(true);
+    // Manual path builds a brand-new campaign, NOT the reused running one.
+    expect(createManualVelocifyCampaign).toHaveBeenCalledWith(100, now);
+    expect(findOrCreateVelocifyCampaign).not.toHaveBeenCalled();
+    expect(res.campaignId).toBe("camp-manual-1");
+    expect(res.campaignName).toMatch(/^Velocify Manual — /);
+    // Survivors land in the new draft campaign's id.
+    expect(insertPendingContacts).toHaveBeenCalledWith(
+      "camp-manual-1",
+      [{ first_name: "Dana & Co", phone_number: "+15551234567" }],
+      expect.any(Number)
+    );
+  });
+
+  it("creates a DISTINCT campaign on each call (never reuses)", async () => {
+    const first = await runSync(new Date("2026-07-23T21:15:00Z"), { manual: true });
+    __resetVelocifyInFlightForTests();
+    const second = await runSync(new Date("2026-07-23T22:20:00Z"), { manual: true });
+    expect(first.campaignId).toBe("camp-manual-1");
+    expect(second.campaignId).toBe("camp-manual-2");
+    expect(first.campaignId).not.toBe(second.campaignId);
+    expect(createManualVelocifyCampaign).toHaveBeenCalledTimes(2);
+  });
+
+  it("still applies brand-new-only dedup on the manual path", async () => {
+    getKnownCampaignContactPhones.mockResolvedValueOnce(new Set(["+15551234567"]));
+    const res = await runSync(new Date(), { manual: true });
+    expect(res.counts?.already_known).toBe(1);
+    expect(res.counts?.added).toBe(0);
+    expect(insertPendingContacts).not.toHaveBeenCalled();
+  });
+
+  it("inserts nothing when the manual campaign can't be created", async () => {
+    createManualVelocifyCampaign.mockResolvedValueOnce(null as any);
+    const res = await runSync(new Date(), { manual: true });
+    expect(res.accepted).toBe(true);
+    expect(res.counts?.added).toBe(0);
+    expect(insertPendingContacts).not.toHaveBeenCalled();
+  });
+});
+
+describe("runSync scheduled path unchanged (reuses running campaign)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, text: async () => FIXTURE_XML })));
+  });
+
+  it("reuses the running 'Velocify Report Sync' campaign and never creates a manual one", async () => {
+    const res = await runSync(new Date("2026-07-23T12:00:00Z"));
+    expect(res.accepted).toBe(true);
+    expect(findOrCreateVelocifyCampaign).toHaveBeenCalledWith(100);
+    expect(createManualVelocifyCampaign).not.toHaveBeenCalled();
+    expect(res.campaignId).toBeUndefined();
+    expect(res.campaignName).toBeUndefined();
+    expect(insertPendingContacts).toHaveBeenCalledWith(
+      "camp-velocify",
+      expect.any(Array),
+      expect.any(Number)
+    );
   });
 });
 

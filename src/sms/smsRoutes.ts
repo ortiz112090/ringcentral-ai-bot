@@ -175,9 +175,14 @@ export async function handleVelocifySync(req: Request, res: Response): Promise<R
     return res.status(404).json({ error: "unknown_bot" });
   }
 
-  const result = await runSync();
+  const result = await runSync(new Date(), { manual: true });
   if (result.accepted) {
-    return res.status(200).json({ accepted: true, counts: result.counts });
+    return res.status(200).json({
+      accepted: true,
+      counts: result.counts,
+      campaignId: result.campaignId,
+      campaignName: result.campaignName,
+    });
   }
   const status = isGateReason(result.reason) ? 409 : 502;
   return res.status(status).json({ accepted: false, reason: result.reason });

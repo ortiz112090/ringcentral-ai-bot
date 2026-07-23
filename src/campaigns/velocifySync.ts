@@ -2,6 +2,7 @@ import { resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { BOT_ID } from "../db/remoteConfig";
 import {
+  createManualVelocifyCampaign,
   findOrCreateVelocifyCampaign,
   getKnownCampaignContactPhones,
   getKnownConversationPhones,
@@ -58,6 +59,9 @@ export interface SyncResult {
   accepted: boolean;
   reason?: string;
   counts?: SyncCounts;
+  /** Set only on the manual path so the dashboard can show/refresh the new campaign. */
+  campaignId?: string;
+  campaignName?: string;
 }
 
 /** Reason codes: gate misses fail "soft" (409); a fetch/parse failure is "hard" (502). */
@@ -397,8 +401,16 @@ export function isVelocifySyncDue(
  * conversation), find-or-creates the campaign, inserts the survivors as pending
  * contacts, and stamps velocify_last_synced_at. Ignores the interval (the scheduled
  * caller checks that separately). Never throws.
+ *
+ * `opts.manual` (set only by the POST velocify-sync route) lands the survivors in a
+ * BRAND-NEW 'Velocify Manual — <date+time>' campaign in status "draft" so the worker
+ * won't send until the user clicks Start; the scheduled path (no opts) is unchanged,
+ * reusing the running 'Velocify Report Sync' campaign.
  */
-export async function runSync(now: Date = new Date()): Promise<SyncResult> {
+export async function runSync(
+  now: Date = new Date(),
+  opts: { manual?: boolean } = {}
+): Promise<SyncResult> {
   if (syncInFlight) {
     logger.info("Velocify sync skipped: a sync is already in flight", { botId: BOT_ID });
     return { accepted: false, reason: SYNC_REASON.inFlight };
@@ -460,9 +472,12 @@ export async function runSync(now: Date = new Date()): Promise<SyncResult> {
       toInsert.push(s);
     }
 
-    // 6. Find-or-create the campaign (updating pace when the setting changed) and
-    //    insert the survivors as pending contacts in chunks.
-    const campaign = await findOrCreateVelocifyCampaign(velocify.pacePerHour);
+    // 6. Resolve the campaign (updating pace when the setting changed) and insert the
+    //    survivors as pending contacts in chunks. Manual pulls ALWAYS create a fresh
+    //    draft campaign; the scheduled path reuses the running 'Velocify Report Sync'.
+    const campaign = opts.manual
+      ? await createManualVelocifyCampaign(velocify.pacePerHour, now)
+      : await findOrCreateVelocifyCampaign(velocify.pacePerHour);
     let added = 0;
     if (campaign && toInsert.length > 0) {
       added = await insertPendingContacts(
@@ -489,6 +504,9 @@ export async function runSync(now: Date = new Date()): Promise<SyncResult> {
       added,
     };
     logger.info("Velocify sync complete", { botId: BOT_ID, ...counts });
+    if (opts.manual && campaign) {
+      return { accepted: true, counts, campaignId: campaign.id, campaignName: campaign.name };
+    }
     return { accepted: true, counts };
   } catch (err) {
     // Belt-and-suspenders: runSync must never throw into the worker tick.
