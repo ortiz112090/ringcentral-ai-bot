@@ -182,6 +182,37 @@ describe("findOrCreateVelocifyCampaign", () => {
     expect(calls).toHaveLength(1); // only the select — no status churn
   });
 
+  it("does NOT un-pause a manually paused campaign (no status write)", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 100, status: "paused", name: VELOCIFY_CAMPAIGN_NAME },
+    });
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("paused"); // manual pause sticks
+    expect(calls).toHaveLength(1); // only the select — pace matches, status untouched
+  });
+
+  it("keeps a paused campaign paused while still updating a changed pace", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 50, status: "paused", name: VELOCIFY_CAMPAIGN_NAME },
+    }); // select
+    results.push({ data: null, error: null }); // pace update
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("paused"); // still paused
+    expect(row?.pace_per_hour).toBe(100);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].op).toBe("update");
+    expect(calls[1].payload).toEqual({ pace_per_hour: 100 }); // status NOT included
+  });
+
+  it("does NOT auto-start a reused draft campaign", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 100, status: "draft", name: VELOCIFY_CAMPAIGN_NAME },
+    });
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("draft"); // stays draft
+    expect(calls).toHaveLength(1); // only the select — no status write
+  });
+
   it("creates a running text_outreach campaign when none exists", async () => {
     results.push({ data: null }); // select → not found
     results.push({ data: { id: "c-new", pace_per_hour: 100, name: VELOCIFY_CAMPAIGN_NAME } }); // insert
