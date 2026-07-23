@@ -18,6 +18,7 @@ const business = { agentName: "Alex", brokerageName: "Acme" };
 const twilio: any = { escalationNumber: "+15559990000" };
 vi.mock("../config", () => ({
   resolveEffectiveConfig: vi.fn(async () => ({ text, business, twilio })),
+  config: { supabase: { url: "http://localhost", serviceRoleKey: "test" } },
 }));
 
 const isPhoneOptedOut = vi.fn(async () => false);
@@ -28,10 +29,12 @@ const createConversation = vi.fn(async () => ({
   channel: "twilio",
 }));
 const getTextStages = vi.fn(async () => []);
+const getActiveOutreachTemplates = vi.fn(async () => [] as any[]);
 vi.mock("./smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
   createConversation: (...a: any[]) => createConversation(...a),
   getTextStages: (...a: any[]) => getTextStages(...a),
+  getActiveOutreachTemplates: (...a: any[]) => getActiveOutreachTemplates(...a),
 }));
 
 const sendSms = vi.fn(async () => ({ sent: true }));

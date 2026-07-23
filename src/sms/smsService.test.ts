@@ -14,6 +14,7 @@ const business = { agentName: "Alex", brokerageName: "Acme" };
 const twilio: any = { escalationNumber: "+15559990000" };
 vi.mock("../config", () => ({
   resolveEffectiveConfig: vi.fn(async () => ({ text, business, twilio })),
+  config: { supabase: { url: "http://localhost", serviceRoleKey: "test" } },
 }));
 
 const isPhoneOptedOut = vi.fn(async () => false);
@@ -23,6 +24,7 @@ const insertTextMessage = vi.fn(async () => {});
 const updateConversationStatus = vi.fn(async () => {});
 const getConversationMessages = vi.fn(async () => []);
 const getTextStages = vi.fn(async () => []);
+const getActiveOutreachTemplates = vi.fn(async () => [] as any[]);
 vi.mock("./smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
   createConversation: (...a: any[]) => createConversation(...a),
@@ -31,6 +33,7 @@ vi.mock("./smsQueries", () => ({
   updateConversationStatus: (...a: any[]) => updateConversationStatus(...a),
   getConversationMessages: (...a: any[]) => getConversationMessages(...a),
   getTextStages: (...a: any[]) => getTextStages(...a),
+  getActiveOutreachTemplates: (...a: any[]) => getActiveOutreachTemplates(...a),
 }));
 
 const sendSms = vi.fn(async () => ({ sent: true }));
@@ -75,6 +78,7 @@ beforeEach(() => {
   findConversationByPhone.mockResolvedValue(null);
   createConversation.mockResolvedValue({ id: "conv-1", phone_number: "+15557778888", status: "active" });
   runSmsTurn.mockResolvedValue({ reply: "Hi!", escalate: false, optedOut: false, declined: false, captured: {} });
+  getActiveOutreachTemplates.mockResolvedValue([]);
 });
 
 describe("handleInboundSms", () => {
@@ -175,6 +179,73 @@ describe("sendMissedCallText / sendWebLeadText gating", () => {
     const sent = await sendWebLeadText({ phone: "+15557778888", now: INSIDE_WINDOW });
     expect(sent).toBe(false);
     expect(sendSms).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendOpener — template rotation", () => {
+  const TEMPLATES = [
+    { id: "t1", template_text: "Hey {first_name}, template ONE here." },
+    { id: "t2", template_text: "Hi {FirstName}, template TWO here." },
+    { id: "t3", template_text: "Yo {firstname}, template THREE here." },
+  ];
+
+  it("sends a random active template, personalized and VERBATIM (no prefix/suffix)", async () => {
+    getActiveOutreachTemplates.mockResolvedValue(TEMPLATES as any);
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0); // → index 0
+    try {
+      const sent = await sendWebLeadText({ phone: "+15557778888", name: "Dana", now: INSIDE_WINDOW });
+      expect(sent).toBe(true);
+      expect(sendSms).toHaveBeenCalledWith(
+        expect.objectContaining({ body: "Hey Dana, template ONE here.", firstBotInitiated: true })
+      );
+    } finally {
+      randSpy.mockRestore();
+    }
+  });
+
+  it("rotates: different Math.random values select different template bodies", async () => {
+    getActiveOutreachTemplates.mockResolvedValue(TEMPLATES as any);
+    const randSpy = vi.spyOn(Math, "random");
+    try {
+      randSpy.mockReturnValue(0); // index 0
+      await sendWebLeadText({ phone: "+15557778888", name: "Dana", now: INSIDE_WINDOW });
+      randSpy.mockReturnValue(0.4); // index 1
+      await sendWebLeadText({ phone: "+15557778888", name: "Dana", now: INSIDE_WINDOW });
+      randSpy.mockReturnValue(0.9); // index 2
+      await sendWebLeadText({ phone: "+15557778888", name: "Dana", now: INSIDE_WINDOW });
+
+      const bodies = sendSms.mock.calls.map((c: any[]) => c[0].body);
+      expect(bodies).toEqual([
+        "Hey Dana, template ONE here.",
+        "Hi Dana, template TWO here.",
+        "Yo Dana, template THREE here.",
+      ]);
+    } finally {
+      randSpy.mockRestore();
+    }
+  });
+
+  it("mirrors the worker's blank-name handling → 'there'", async () => {
+    getActiveOutreachTemplates.mockResolvedValue(TEMPLATES as any);
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      await sendMissedCallText({ phone: "+15557778888", now: INSIDE_WINDOW });
+      expect(sendSms).toHaveBeenCalledWith(
+        expect.objectContaining({ body: "Hey there, template ONE here." })
+      );
+    } finally {
+      randSpy.mockRestore();
+    }
+  });
+
+  it("falls back to buildOpenerText when there are 0 active templates", async () => {
+    getActiveOutreachTemplates.mockResolvedValue([]);
+    const sent = await sendWebLeadText({ phone: "+15557778888", name: "Dana", now: INSIDE_WINDOW });
+    expect(sent).toBe(true);
+    const body = sendSms.mock.calls[0][0].body;
+    expect(body).toBe(
+      buildOpenerText({ stages: [], leadName: "Dana", agentName: "Alex", businessName: "Acme" })
+    );
   });
 });
 
