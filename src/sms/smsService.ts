@@ -13,6 +13,7 @@ import { sendSms } from "./smsSend";
 import {
   createConversation,
   findConversationByPhone,
+  getActiveOutreachTemplates,
   getConversationMessages,
   getTextStages,
   hasProviderMessage,
@@ -24,6 +25,7 @@ import {
   type TextStageRow,
   type TextTrigger,
 } from "./smsQueries";
+import { buildFirstMessage, pickTemplate } from "../campaigns/textOutreachWorker";
 
 /**
  * SMS orchestration: ties the compliance layer, conversation store, engine, and
@@ -202,13 +204,23 @@ async function sendOpener(input: {
     return false;
   }
 
-  const stages = await getTextStages();
-  const openerBody = buildOpenerText({
-    stages,
-    leadName: input.leadName,
-    agentName: business.agentName,
-    businessName: text.businessName,
-  });
+  // Prefer the tenant's seeded follow-up opener templates: pick one uniformly at
+  // random and personalize it exactly as the outreach worker does, so bot-initiated
+  // openers rotate. Only when there are none do we fall back to the stage-based opener.
+  const templates = await getActiveOutreachTemplates();
+  let openerBody: string;
+  if (templates.length > 0) {
+    const template = pickTemplate(templates);
+    openerBody = buildFirstMessage(template.template_text, input.leadName);
+  } else {
+    const stages = await getTextStages();
+    openerBody = buildOpenerText({
+      stages,
+      leadName: input.leadName,
+      agentName: business.agentName,
+      businessName: text.businessName,
+    });
+  }
 
   // Choose the outbound channel from effective config. RingCentral-only tenants
   // have rcSmsNumber set and no Twilio number; without this the opener would default

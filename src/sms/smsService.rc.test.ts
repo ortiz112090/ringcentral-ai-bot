@@ -15,6 +15,7 @@ const business = { agentName: "Alex", brokerageName: "Acme" };
 const twilio: any = { escalationNumber: "+15559990000" };
 vi.mock("../config", () => ({
   resolveEffectiveConfig: vi.fn(async () => ({ text, business, twilio })),
+  config: { supabase: { url: "http://localhost", serviceRoleKey: "test" } },
 }));
 
 const hasProviderMessage = vi.fn(async () => false);
