@@ -113,7 +113,7 @@ export async function findOrCreateVelocifyCampaign(
     const row = existing as CampaignRow;
     const update: { pace_per_hour?: number; status?: CampaignStatus } = {};
     if (row.pace_per_hour !== pacePerHour) update.pace_per_hour = pacePerHour;
-    if (row.status !== "running") update.status = "running";
+    if (row.status === "completed") update.status = "running";
     if (Object.keys(update).length > 0) {
       const { error: updErr } = await supabase
         .from("campaigns")
