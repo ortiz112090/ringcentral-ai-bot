@@ -57,6 +57,14 @@ function subscriptionTargetExtension(sub: any): string {
 // second under the cap, matching the spec.
 const EXPIRES_IN = 604799;
 
+// RC's subscription-create validation POSTs our webhook a probe and requires a
+// response within 3000ms. During boot / free-tier cold start the service can't
+// answer in time and RC returns SUB-521 ("WebHook is not reachable"). That is
+// transient, so we retry creation later at increasing delays instead of leaving
+// the tenant with no subscription until the next boot. Non-blocking: each retry is
+// a self-scheduling unref'd timer, so startup and the poller never wait on it.
+const CREATE_RETRY_DELAYS_MS = [15_000, 45_000, 120_000];
+
 // Renew when the subscription has less than this long left before it expires.
 const RENEW_LEAD_MS = 24 * 60 * 60 * 1000; // 24h
 
@@ -151,6 +159,117 @@ async function createSubscription(
   });
 }
 
+/** True when an RC error is SUB-521 ("WebHook is not reachable" validation probe). */
+function isSub521(detail: Record<string, unknown> | undefined, err: unknown): boolean {
+  if (detail?.errorCode === "SUB-521") return true;
+  const errs = Array.isArray(detail?.errors) ? (detail!.errors as any[]) : [];
+  if (errs.some((e) => e?.errorCode === "SUB-521")) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("SUB-521");
+}
+
+/**
+ * True when an error looks like a transport/network failure (no HTTP response, or a
+ * known connect/DNS/timeout code) rather than an RC-application error. Such failures
+ * are transient and safe to retry, same as SUB-521.
+ */
+function isNetworkError(err: unknown): boolean {
+  const status = (err as { response?: { status?: unknown } })?.response?.status;
+  if (typeof status === "number") return false; // RC answered → application error, not transport
+  const code = (err as { code?: unknown })?.code;
+  const networkCodes = ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN"];
+  if (typeof code === "string" && networkCodes.includes(code)) return true;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("network") ||
+    msg.includes("timeout") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("enotfound")
+  );
+}
+
+/** Delete a subscription by id, logging (never throwing) on failure. */
+async function deleteStaleSubscription(id: string): Promise<void> {
+  try {
+    await rcDelete(`${SUBSCRIPTION_BASE}/${id}`);
+  } catch (err) {
+    const detail = await extractRcErrorDetail(err);
+    logger.warn("Failed to delete stale RC SMS subscription", {
+      botId: BOT_ID,
+      id,
+      error: err instanceof Error ? err.message : String(err),
+      errorCode: detail?.errorCode,
+      errors: detail?.errors,
+    });
+  }
+}
+
+/**
+ * Create the subscription, and on a transient failure (SUB-521 or a network error)
+ * retry later at increasing delays (CREATE_RETRY_DELAYS_MS) via self-scheduling
+ * unref'd timers — non-blocking, so startup/poller never wait. On any other RC error
+ * (auth, invalid param, …) the error is rethrown so the caller's top-level handler
+ * logs it and does not retry.
+ *
+ * Safer-ordering guarantee: a replacement is only created here; the caller's stale
+ * subscription (staleSubscriptionId) is deleted ONLY after this create succeeds, so
+ * we never land in the "deleted the working subscription but failed to recreate" dead
+ * state — even when success only happens on a later retry.
+ */
+async function createSubscriptionWithRetry(
+  address: string,
+  extensionId: string | undefined,
+  staleSubscriptionId?: string,
+  attempt = 0
+): Promise<void> {
+  try {
+    await createSubscription(address, extensionId);
+    if (staleSubscriptionId) {
+      // Create-then-delete: the new subscription is live, so removing the old one
+      // now can never leave the tenant without a working subscription.
+      await deleteStaleSubscription(staleSubscriptionId);
+    }
+  } catch (err) {
+    const detail = await extractRcErrorDetail(err);
+    const retryable = isSub521(detail, err) || isNetworkError(err);
+    if (retryable && attempt < CREATE_RETRY_DELAYS_MS.length) {
+      const delayMs = CREATE_RETRY_DELAYS_MS[attempt];
+      logger.warn("RC SMS subscription create failed (transient); scheduling retry", {
+        botId: BOT_ID,
+        attempt: attempt + 1,
+        maxRetries: CREATE_RETRY_DELAYS_MS.length,
+        delayMs,
+        error: err instanceof Error ? err.message : String(err),
+        errorCode: detail?.errorCode,
+      });
+      const timer = setTimeout(() => {
+        void createSubscriptionWithRetry(address, extensionId, staleSubscriptionId, attempt + 1);
+      }, delayMs);
+      timer.unref?.();
+      return;
+    }
+    if (retryable) {
+      // Retries exhausted: log and stop. The old subscription (if any) was never
+      // deleted, so inbound replies keep flowing; the hourly poller will try again.
+      logger.error(
+        "RC SMS subscription create failed after all retries (service still running)",
+        {
+          botId: BOT_ID,
+          attempts: attempt + 1,
+          error: err instanceof Error ? err.message : String(err),
+          errorCode: detail?.errorCode,
+          errors: detail?.errors,
+        }
+      );
+      return;
+    }
+    // Non-transient error: surface to the top-level handler (no retry).
+    throw err;
+  }
+}
+
 /** Renew an existing subscription by id. */
 async function renewSubscription(subscriptionId: string): Promise<void> {
   const result = await rcPost(`${SUBSCRIPTION_BASE}/${subscriptionId}/renew`, {});
@@ -182,35 +301,30 @@ export async function provisionRcSmsSubscription(): Promise<void> {
 
     const existing = await findOurSubscription(gate.address);
     if (!existing) {
-      await createSubscription(gate.address, gate.extensionId);
+      await createSubscriptionWithRetry(gate.address, gate.extensionId);
       return;
     }
 
-    // The subscription must follow the extension the bot sends as. When the chosen
-    // extension changed (dashboard edit), the old subscription still targets the
-    // previous extension's message-store, so delete + recreate it fresh.
+    // The subscription must follow the extension the bot sends as. Only recreate on a
+    // true mismatch when an EXPLICIT extension id is configured. When the desired
+    // extension is '~' (the authenticated user, our default), RC persists and returns
+    // the RESOLVED numeric id (e.g. "1908698019"); comparing that to the literal '~'
+    // would false-positive on every boot and delete the working subscription — the
+    // production self-destruct bug. Any subscription in this list already matches our
+    // webhook address, so on '~' it is ours regardless of the stored numeric id.
     const desiredExt = extSegment(gate.extensionId);
     const currentExt = subscriptionTargetExtension(existing);
-    if (currentExt !== desiredExt) {
+    if (desiredExt !== "~" && currentExt !== desiredExt) {
       logger.info("RC SMS subscription targets a different extension; recreating", {
         botId: BOT_ID,
         id: existing.id,
         currentExtension: currentExt,
         desiredExtension: desiredExt,
       });
-      try {
-        await rcDelete(`${SUBSCRIPTION_BASE}/${String(existing.id)}`);
-      } catch (err) {
-        const detail = await extractRcErrorDetail(err);
-        logger.warn("Failed to delete stale RC SMS subscription before recreate", {
-          botId: BOT_ID,
-          id: existing.id,
-          error: err instanceof Error ? err.message : String(err),
-          errorCode: detail?.errorCode,
-          errors: detail?.errors,
-        });
-      }
-      await createSubscription(gate.address, gate.extensionId);
+      // Create-then-delete (Fix 3): the old subscription is removed only after the
+      // replacement is confirmed created (inside createSubscriptionWithRetry), so a
+      // failed/retrying create never leaves us with no subscription.
+      await createSubscriptionWithRetry(gate.address, gate.extensionId, String(existing.id));
       return;
     }
 
@@ -232,7 +346,9 @@ export async function provisionRcSmsSubscription(): Promise<void> {
           errorCode: detail?.errorCode,
           errors: detail?.errors,
         });
-        await createSubscription(gate.address, gate.extensionId);
+        // Recreate with the same safe ordering + SUB-521 retry; delete the stale
+        // subscription only after the replacement is live.
+        await createSubscriptionWithRetry(gate.address, gate.extensionId, String(existing.id));
       }
       return;
     }
