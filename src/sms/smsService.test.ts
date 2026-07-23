@@ -179,7 +179,7 @@ describe("sendMissedCallText / sendWebLeadText gating", () => {
 });
 
 describe("buildOpenerText", () => {
-  it("uses the opener stage script verbatim with placeholders filled and business ensured", () => {
+  it("uses the opener stage script VERBATIM with placeholders filled and no injected prefix", () => {
     const body = buildOpenerText({
       stages: [
         { stage_key: "opener", stage_order: 1, stage_type: "opener", title: "Opener", script_text: "Hi (Client's Name), it's (Agent Name) here." } as any,
@@ -188,8 +188,7 @@ describe("buildOpenerText", () => {
       agentName: "Alex",
       businessName: "Acme",
     });
-    expect(body).toContain("Hi Dana, it's Alex here.");
-    expect(body.toLowerCase()).toContain("acme");
+    expect(body).toBe("Hi Dana, it's Alex here.");
   });
 
   it("falls back to a default opener that names the agent and business", () => {

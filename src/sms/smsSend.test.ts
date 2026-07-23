@@ -20,7 +20,7 @@ vi.mock("./smsQueries", () => ({
   insertTextMessage: (...a: any[]) => insertTextMessage(...a),
 }));
 
-import { sendSms, withOptOutSuffix } from "./smsSend";
+import { sendSms } from "./smsSend";
 
 const convo: any = { id: "conv-1", phone_number: "+15557778888", status: "active" };
 
@@ -49,22 +49,15 @@ describe("sendSms opt-out enforcement", () => {
     );
   });
 
-  it("appends the STOP suffix on the FIRST bot-initiated message", async () => {
+  it("sends the FIRST bot-initiated message VERBATIM (no opt-out suffix appended)", async () => {
     await sendSms({ conversation: convo, body: "Hi, this is Acme.", firstBotInitiated: true });
     const sentBody = messagesCreate.mock.calls[0][0].body as string;
-    expect(sentBody.toLowerCase()).toContain("reply stop to opt out");
+    expect(sentBody).toBe("Hi, this is Acme.");
   });
 
-  it("does NOT append the suffix on replies to inbound (not bot-initiated)", async () => {
+  it("sends replies to inbound VERBATIM as well", async () => {
     await sendSms({ conversation: convo, body: "Sure, what's your ZIP?" });
     const sentBody = messagesCreate.mock.calls[0][0].body as string;
     expect(sentBody).toBe("Sure, what's your ZIP?");
-  });
-});
-
-describe("withOptOutSuffix", () => {
-  it("adds the suffix when absent and leaves it alone when STOP already present", () => {
-    expect(withOptOutSuffix("Hello").toLowerCase()).toContain("reply stop to opt out");
-    expect(withOptOutSuffix("Text STOP anytime")).toBe("Text STOP anytime");
   });
 });

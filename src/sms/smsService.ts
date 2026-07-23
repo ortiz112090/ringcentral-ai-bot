@@ -167,7 +167,7 @@ export async function handleInboundSms(input: {
  * Bot-INITIATED opener (missed-call follow-up / web-lead outreach). Shared by both
  * triggers. Enforces: text bot enabled, the relevant sub-toggle, opt-out, and quiet
  * hours (8am–9pm bot timezone) BEFORE creating a conversation or sending. Sends the
- * opener with the mandatory business identification + "Reply STOP to opt out."
+ * opener text VERBATIM (no injected prefix or opt-out suffix).
  * Returns whether an opener was sent (false when gated/blocked).
  */
 async function sendOpener(input: {
@@ -266,9 +266,8 @@ export async function sendWebLeadText(input: {
 
 /**
  * Build the opener text. Prefers the first active opener stage's script_text
- * (placeholders filled), else a sensible default. Always ensures the business name
- * is present so the opener identifies who's texting (compliance). The STOP suffix
- * is added by sendSms(firstBotInitiated).
+ * (placeholders filled), else a sensible default. Sent VERBATIM — the operator's
+ * template is responsible for any company-name identification and opt-out language.
  */
 export function buildOpenerText(input: {
   stages: TextStageRow[];
@@ -278,7 +277,7 @@ export function buildOpenerText(input: {
 }): string {
   const name = input.leadName?.trim() ? input.leadName.trim() : "there";
   const opener = (input.stages ?? []).find((s) => s.stage_type === "opener");
-  let body =
+  const body =
     opener && (opener.script_text ?? "").trim() !== ""
       ? (opener.script_text as string)
           .replace(/\(Client's Name\)/g, name)
@@ -287,10 +286,6 @@ export function buildOpenerText(input: {
           .trim()
       : `Hi ${name}, this is ${input.agentName} with ${input.businessName}. I saw you were looking into getting an SR22 filed — is now a good time to help you get that sorted?`;
 
-  // Ensure the business is identified in the very first outbound message.
-  if (!body.toLowerCase().includes(input.businessName.toLowerCase())) {
-    body = `${input.businessName}: ${body}`;
-  }
   return body;
 }
 
