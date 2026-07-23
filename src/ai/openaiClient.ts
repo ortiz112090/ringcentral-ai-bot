@@ -25,8 +25,9 @@ export async function getOpenAI(): Promise<OpenAI> {
   if (!apiKey) {
     throw new Error(
       `OpenAI API key missing for tenant BOT_ID=${BOT_ID}. Set it in Supabase ` +
-        `api_credentials (provider "openai-tts") for this bot; env-var fallback ` +
-        `applies only to the primary bot.`
+        `api_credentials (provider "openai", key "api_key"; legacy provider ` +
+        `"openai-tts" also accepted) for this bot; env-var fallback applies ` +
+        `only to the primary bot.`
     );
   }
   if (!current || current.apiKey !== apiKey) {

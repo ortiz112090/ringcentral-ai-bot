@@ -459,7 +459,14 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       ),
     },
     openai: {
-      apiKey: credentialFirst("OPENAI_API_KEY", getCredential("openai-tts", "api_key")),
+      // The Lovable dashboard writes this tenant's OpenAI key under provider
+      // "openai" (key "api_key"); provider "openai-tts" is the legacy fallback
+      // for bots configured before the dashboard change. Env still wins first,
+      // and only for the primary bot (credentialFirst enforces the isolation).
+      apiKey: credentialFirst(
+        "OPENAI_API_KEY",
+        getCredential("openai", "api_key") ?? getCredential("openai-tts", "api_key")
+      ),
       // Env-first, then a bot_config column if one is ever added (none today — no
       // migration), then the hardcoded default. Not a credential, so plain envFirst.
       transcribeModel:
