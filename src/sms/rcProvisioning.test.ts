@@ -322,6 +322,58 @@ describe("provisionRcSmsSubscription — follows the chosen extension", () => {
     expect(rcPost).not.toHaveBeenCalled();
   });
 
+  it("does NOT recreate when desired is '~' but the stored subscription has a resolved numeric extension", async () => {
+    // Production self-destruct bug: we create with '~' and RC returns the resolved
+    // numeric id. desired '~' must not be treated as a mismatch against a numeric id.
+    effectiveText.rcSmsExtensionId = undefined; // desired '~'
+    rcGet.mockResolvedValue({
+      records: [
+        existingSub([
+          "/restapi/v1.0/account/~/extension/1908698019/message-store/instant?type=SMS",
+        ]),
+      ],
+    });
+    await provisionRcSmsSubscription();
+    expect(rcDelete).not.toHaveBeenCalled();
+    expect(rcPost).not.toHaveBeenCalled();
+  });
+
+  it("recreates on a true mismatch between two explicit numeric extensions ('123' vs '456')", async () => {
+    effectiveText.rcSmsExtensionId = "123";
+    rcGet.mockResolvedValue({
+      records: [
+        existingSub([
+          "/restapi/v1.0/account/~/extension/456/message-store/instant?type=SMS",
+        ]),
+      ],
+    });
+    await provisionRcSmsSubscription();
+    // Create-then-delete ordering: the replacement is created, then the stale one removed.
+    expect(rcPost).toHaveBeenCalledWith(
+      "/restapi/v1.0/subscription",
+      expect.objectContaining({
+        eventFilters: [
+          "/restapi/v1.0/account/~/extension/123/message-store/instant?type=SMS",
+        ],
+      })
+    );
+    expect(rcDelete).toHaveBeenCalledWith("/restapi/v1.0/subscription/sub-1");
+  });
+
+  it("leaves an explicit numeric extension alone when it already matches ('123' vs '123')", async () => {
+    effectiveText.rcSmsExtensionId = "123";
+    rcGet.mockResolvedValue({
+      records: [
+        existingSub([
+          "/restapi/v1.0/account/~/extension/123/message-store/instant?type=SMS",
+        ]),
+      ],
+    });
+    await provisionRcSmsSubscription();
+    expect(rcDelete).not.toHaveBeenCalled();
+    expect(rcPost).not.toHaveBeenCalled();
+  });
+
   it("does not recreate a legacy (no eventFilters) subscription while still on the authenticated extension", async () => {
     // rcSmsExtensionId undefined → desired '~'; a sub with no parseable filter
     // defaults to '~', so it matches and is left healthy.
@@ -337,6 +389,82 @@ describe("provisionRcSmsSubscription — follows the chosen extension", () => {
     await provisionRcSmsSubscription();
     expect(rcDelete).not.toHaveBeenCalled();
     expect(rcPost).not.toHaveBeenCalled();
+  });
+});
+
+/** Build an RC SDK-style ApiError carrying a JSON error body (errorCode + errors[]). */
+function makeApiError(errorCode: string, message: string) {
+  const body = { errorCode, message, errors: [{ errorCode, message }] };
+  const err: any = new Error(message);
+  err.response = {
+    status: 400,
+    clone: () => ({ json: async () => body }),
+    json: async () => body,
+  };
+  return err;
+}
+
+describe("provisionRcSmsSubscription — SUB-521 create retry", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("retries creation on SUB-521 with backoff (15s, then 45s) until it succeeds", async () => {
+    rcGet.mockResolvedValue({ records: [] });
+    rcPost
+      .mockRejectedValueOnce(makeApiError("SUB-521", "WebHook is not reachable")) // initial
+      .mockRejectedValueOnce(makeApiError("SUB-521", "WebHook is not reachable")) // retry 1
+      .mockResolvedValueOnce({ id: "sub-new", expirationTime: farFuture() }); // retry 2
+
+    await provisionRcSmsSubscription();
+    expect(rcPost).toHaveBeenCalledTimes(1); // initial attempt only; retry is scheduled
+
+    await vi.advanceTimersByTimeAsync(15_000); // first retry
+    expect(rcPost).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(45_000); // second retry → succeeds
+    expect(rcPost).toHaveBeenCalledTimes(3);
+
+    // No further retries scheduled after success.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(rcPost).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up after 3 retries when SUB-521 persists (service still running)", async () => {
+    rcGet.mockResolvedValue({ records: [] });
+    rcPost.mockRejectedValue(makeApiError("SUB-521", "WebHook is not reachable"));
+
+    await provisionRcSmsSubscription();
+    expect(rcPost).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(45_000);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(rcPost).toHaveBeenCalledTimes(4); // initial + 3 retries
+    // Further time advances schedule nothing more.
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(rcPost).toHaveBeenCalledTimes(4);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("after all retries"),
+      expect.objectContaining({ errorCode: "SUB-521" })
+    );
+  });
+
+  it("does NOT retry on a non-SUB-521 RC error (e.g. invalid param)", async () => {
+    rcGet.mockResolvedValue({ records: [] });
+    rcPost.mockRejectedValue(makeApiError("CMN-101", "Parameter value is invalid"));
+
+    await provisionRcSmsSubscription();
+    expect(rcPost).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(rcPost).toHaveBeenCalledTimes(1); // never retried
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("provisioning failed"),
+      expect.objectContaining({ errorCode: "CMN-101" })
+    );
   });
 });
 
