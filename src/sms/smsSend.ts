@@ -4,6 +4,7 @@ import { getTwilioClient } from "../twilio/client";
 import { sendRcSms } from "./rcSms";
 import {
   insertTextMessage,
+  isPhoneHandedOff,
   isPhoneOptedOut,
   type TextConversationRow,
 } from "./smsQueries";
@@ -11,8 +12,10 @@ import {
 /** Outcome of an outbound send attempt. */
 export interface SendResult {
   sent: boolean;
-  /** Why the send was skipped (opted_out / no_credentials / no_number / error). */
+  /** Why the send was skipped (opted_out / handed_off / no_credentials / no_number / error). */
   reason?: string;
+  /** RC message-store id captured on a successful RingCentral send (id-match echo detection). */
+  providerMessageId?: string;
 }
 
 /**
@@ -46,6 +49,15 @@ export async function sendSms(input: {
     return { sent: false, reason: "opted_out" };
   }
 
+  // Handoff: once a human agent took over this client, the bot goes silent for them
+  // permanently — never send another outbound (checked fresh every send, per phone).
+  if (await isPhoneHandedOff(phone)) {
+    logger.info("Skipping outbound SMS: conversation handed off to human", {
+      conversationId: conversation.id,
+    });
+    return { sent: false, reason: "handed_off" };
+  }
+
   const body = input.body;
 
   // Reply out the SAME channel the conversation lives on.
@@ -59,8 +71,9 @@ export async function sendSms(input: {
     conversationId: conversation.id,
     direction: "outbound",
     body,
+    providerMessageId: result.providerMessageId ?? null,
   });
-  return { sent: true };
+  return { sent: true, providerMessageId: result.providerMessageId };
 }
 
 /** Twilio-channel send: tenant text_number as From via the REST client. */
@@ -108,5 +121,5 @@ async function sendViaRingCentral(
   if (!res.sent) {
     return { sent: false, reason: res.reason ?? "error" };
   }
-  return { sent: true };
+  return { sent: true, providerMessageId: res.providerMessageId };
 }

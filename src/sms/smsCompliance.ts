@@ -39,18 +39,38 @@ export const QUIET_HOURS_START = 8; // 8am
 export const QUIET_HOURS_END = 21; // 9pm
 
 /**
- * True when `now` falls within the allowed texting window (8am–9pm) in the given
- * IANA timezone. Used to gate BOT-INITIATED texts (missed-call / web-lead openers);
- * replies to an inbound text are always allowed (the user just messaged us).
+ * True when `now` falls within the allowed texting window in the given IANA timezone.
+ * The window bounds default to the 8am–9pm constants so existing callers/tests are
+ * unchanged, but are per-bot configurable (bot_config.text_window_start_hour /
+ * text_window_end_hour). Used to gate BOT-INITIATED texts (missed-call / web-lead
+ * openers, campaign sends); replies to an inbound text are always allowed.
  *
  * Uses Intl to read the wall-clock hour in the target timezone without pulling in a
- * date library. On an invalid timezone we fail OPEN (return true) rather than block
- * every send — a misconfigured tz should not silently mute the bot.
+ * date library. Fails OPEN (returns true) rather than mute the bot when either:
+ *   - the timezone is invalid, or
+ *   - the configured window is invalid (non-integer, out of 0–23, or start >= end;
+ *     wrapping past midnight is not supported) — a misconfig must not silently mute.
  */
-export function isWithinTextingWindow(now: Date, timeZone: string): boolean {
+export function isWithinTextingWindow(
+  now: Date,
+  timeZone: string,
+  startHour: number = QUIET_HOURS_START,
+  endHour: number = QUIET_HOURS_END
+): boolean {
+  if (
+    !Number.isInteger(startHour) ||
+    !Number.isInteger(endHour) ||
+    startHour < 0 ||
+    startHour > 23 ||
+    endHour < 0 ||
+    endHour > 23 ||
+    startHour >= endHour
+  ) {
+    return true; // invalid window → fail open
+  }
   const hour = hourInTimeZone(now, timeZone);
   if (hour === null) return true; // unknown tz → don't block
-  return hour >= QUIET_HOURS_START && hour < QUIET_HOURS_END;
+  return hour >= startHour && hour < endHour;
 }
 
 /** The wall-clock hour (0–23) at `now` in `timeZone`, or null when tz is invalid. */

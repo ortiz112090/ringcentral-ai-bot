@@ -19,6 +19,7 @@ vi.mock("../db/remoteConfig", () => ({
 
 const isPhoneOptedOut = vi.fn(async () => false);
 const isPhoneDeclined = vi.fn(async () => false);
+const isPhoneHandedOff = vi.fn(async () => false);
 const getActiveOutreachTemplates = vi.fn(async () => [
   { id: "tmpl-1", template_text: "Hi {first_name}, following up!" },
 ]);
@@ -37,6 +38,7 @@ const createConversation = vi.fn(async (input: any) => ({
 vi.mock("../sms/smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
   isPhoneDeclined: (...a: any[]) => isPhoneDeclined(...a),
+  isPhoneHandedOff: (...a: any[]) => isPhoneHandedOff(...a),
   getActiveOutreachTemplates: (...a: any[]) => getActiveOutreachTemplates(...a),
   findConversationByPhone: (...a: any[]) => findConversationByPhone(...a),
   createConversation: (...a: any[]) => createConversation(...a),
@@ -114,6 +116,7 @@ beforeEach(() => {
   cfg.text.number = "+15550000001";
   isPhoneOptedOut.mockResolvedValue(false);
   isPhoneDeclined.mockResolvedValue(false);
+  isPhoneHandedOff.mockResolvedValue(false);
   getActiveOutreachTemplates.mockResolvedValue([...templates]);
   findConversationByPhone.mockResolvedValue(null);
   sendSms.mockResolvedValue({ sent: true });
@@ -232,6 +235,15 @@ describe("processTextOutreachCampaign", () => {
     isPhoneDeclined.mockImplementation(async (phone: string) => phone === contact(1).phone_number);
     await processTextOutreachCampaign(campaign, ctx);
     expect(setContactStatus).toHaveBeenCalledWith(1, "skipped", "declined");
+    expect(sendSms).toHaveBeenCalledTimes(1); // only contact 2 sent
+    expect(setContactStatus).toHaveBeenCalledWith(2, "sent", "delivered_attempt");
+  });
+
+  it("skips handed-off numbers as skipped/handed_off without sending (agent takeover)", async () => {
+    claimPendingContacts.mockResolvedValueOnce([contact(1), contact(2)]);
+    isPhoneHandedOff.mockImplementation(async (phone: string) => phone === contact(1).phone_number);
+    await processTextOutreachCampaign(campaign, ctx);
+    expect(setContactStatus).toHaveBeenCalledWith(1, "skipped", "handed_off");
     expect(sendSms).toHaveBeenCalledTimes(1); // only contact 2 sent
     expect(setContactStatus).toHaveBeenCalledWith(2, "sent", "delivered_attempt");
   });

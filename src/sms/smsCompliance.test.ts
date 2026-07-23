@@ -45,6 +45,27 @@ describe("isWithinTextingWindow (quiet hours 8am–9pm)", () => {
   it("fails open (allows) on an invalid timezone rather than muting the bot", () => {
     expect(isWithinTextingWindow(new Date("2026-07-21T03:00:00Z"), "Not/AZone")).toBe(true);
   });
+
+  it("respects a CUSTOM start/end window (Part A)", () => {
+    // Window 10–14 (UTC): 09:00 outside, 10:00 inside, 13:59 inside, 14:00 exclusive.
+    expect(isWithinTextingWindow(new Date("2026-07-21T09:00:00Z"), "UTC", 10, 14)).toBe(false);
+    expect(isWithinTextingWindow(new Date("2026-07-21T10:00:00Z"), "UTC", 10, 14)).toBe(true);
+    expect(isWithinTextingWindow(new Date("2026-07-21T13:59:00Z"), "UTC", 10, 14)).toBe(true);
+    expect(isWithinTextingWindow(new Date("2026-07-21T14:00:00Z"), "UTC", 10, 14)).toBe(false);
+  });
+
+  it("fails OPEN when the window is invalid (start >= end) rather than muting all day", () => {
+    // Noon would be outside a naive 21–8 range, but start>=end is invalid → allow.
+    expect(isWithinTextingWindow(new Date("2026-07-21T12:00:00Z"), "UTC", 21, 8)).toBe(true);
+    expect(isWithinTextingWindow(new Date("2026-07-21T12:00:00Z"), "UTC", 9, 9)).toBe(true);
+    // Out-of-range hours are also invalid → fail open.
+    expect(isWithinTextingWindow(new Date("2026-07-21T03:00:00Z"), "UTC", -1, 30)).toBe(true);
+  });
+
+  it("keeps the default 8–21 window when no bounds are passed", () => {
+    expect(isWithinTextingWindow(new Date("2026-07-21T08:00:00Z"), "UTC")).toBe(true);
+    expect(isWithinTextingWindow(new Date("2026-07-21T21:00:00Z"), "UTC")).toBe(false);
+  });
 });
 
 describe("buildHelpReply + OPT_OUT_SUFFIX", () => {

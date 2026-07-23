@@ -5,7 +5,7 @@ import { config, resolveEffectiveConfig, twilioSmsWebhookUrl } from "../config";
 import { logger } from "../logger";
 import { BOT_ID, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "../twilio/client";
-import { handleInboundSms, sendWebLeadText } from "./smsService";
+import { handleAgentTakeover, handleInboundSms, sendWebLeadText } from "./smsService";
 import { roleAllows } from "../roles";
 import { isGateReason, runSync } from "../campaigns/velocifySync";
 
@@ -256,7 +256,9 @@ export async function handleRcSmsWebhook(req: Request, res: Response): Promise<R
     res.set("Validation-Token", validationToken);
   }
 
-  // 4. Parse the message-store instant event. body.body carries the message.
+  // 4. Parse the message-store instant event. body.body carries the message. Both
+  //    Inbound (a client texting us) and Outbound (our own send OR a human agent
+  //    typing in the RC app) SMS events are inspected; other events are ignored.
   const messageBody = (req.body ?? {}).body as
     | {
         id?: unknown;
@@ -266,22 +268,19 @@ export async function handleRcSmsWebhook(req: Request, res: Response): Promise<R
         subject?: unknown;
       }
     | undefined;
-  if (!messageBody || messageBody.direction !== "Inbound") {
-    // Non-inbound (e.g. our own outbound echo) or a non-message event: ack + ignore.
+  const direction = messageBody?.direction;
+  if (!messageBody || (direction !== "Inbound" && direction !== "Outbound")) {
+    // A non-message event (e.g. the validation probe) or an unhandled type: ack + ignore.
     return res.status(200).send();
   }
 
-  const from = typeof messageBody.from?.phoneNumber === "string" ? messageBody.from.phoneNumber.trim() : "";
   const text = typeof messageBody.subject === "string" ? messageBody.subject : "";
   const messageId = messageBody.id != null ? String(messageBody.id) : "";
-  if (!from) {
-    logger.warn("Inbound RC SMS ignored: missing from.phoneNumber");
-    return res.status(200).send();
-  }
 
-  // Fast in-memory dedupe before any DB/engine work.
+  // Fast in-memory dedupe before any DB/engine work — a redelivered event (either
+  // direction) must not re-process (re-reply, or re-trigger takeover detection).
   if (messageId && rcMessageSeen(messageId)) {
-    logger.info("Inbound RC SMS skipped: duplicate message id (in-memory LRU)", { messageId });
+    logger.info("RC SMS skipped: duplicate message id (in-memory LRU)", { messageId });
     return res.status(200).send();
   }
 
@@ -291,13 +290,40 @@ export async function handleRcSmsWebhook(req: Request, res: Response): Promise<R
 
   // Role gate (fresh per message): SMS runs only for the texting role.
   if (!roleAllows(botRole, "sms")) {
-    logger.info("Inbound RC SMS ignored: tenant role does not allow SMS", { botId: BOT_ID, botRole });
+    logger.info("RC SMS ignored: tenant role does not allow SMS", { botId: BOT_ID, botRole });
     return res.status(200).send();
   }
 
   // Kill switch: text bot disabled → acknowledge with no reply.
   if (!textCfg.enabled) {
-    logger.info("Inbound RC SMS ignored: text bot disabled for tenant", { botId: BOT_ID });
+    logger.info("RC SMS ignored: text bot disabled for tenant", { botId: BOT_ID });
+    return res.status(200).send();
+  }
+
+  // Outbound: distinguish the bot's own echo from a human-agent takeover. The client
+  // is the recipient (to[0]); resolve it and delegate to the takeover detector.
+  if (direction === "Outbound") {
+    const clientPhone =
+      Array.isArray(messageBody.to) && typeof messageBody.to[0]?.phoneNumber === "string"
+        ? messageBody.to[0].phoneNumber.trim()
+        : "";
+    if (!clientPhone) {
+      logger.warn("Outbound RC SMS ignored: missing to[0].phoneNumber");
+      return res.status(200).send();
+    }
+    try {
+      await handleAgentTakeover({ eventId: messageId, clientPhone, body: text });
+    } catch (err) {
+      logger.error("handleAgentTakeover threw unexpectedly", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return res.status(200).send();
+  }
+
+  const from = typeof messageBody.from?.phoneNumber === "string" ? messageBody.from.phoneNumber.trim() : "";
+  if (!from) {
+    logger.warn("Inbound RC SMS ignored: missing from.phoneNumber");
     return res.status(200).send();
   }
 

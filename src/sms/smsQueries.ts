@@ -15,7 +15,15 @@ export type TextConversationStatus =
   | "completed"
   | "escalated"
   | "opted_out"
-  | "declined";
+  | "declined"
+  // A human agent took over this client's thread from the RC app; the bot goes
+  // permanently silent for that client (no replies, no campaign sends).
+  | "handed_off";
+
+/** True when a conversation status means a human agent has taken over the thread. */
+export function isHandedOff(status: string | null | undefined): boolean {
+  return status === "handed_off";
+}
 
 export type TextTrigger = "inbound" | "missed_call" | "web_lead";
 
@@ -316,6 +324,84 @@ export async function isPhoneDeclined(
     return true;
   }
   return (count ?? 0) > 0;
+}
+
+/**
+ * Mark this phone's thread(s) as handed off to a human agent on this bot. Sets
+ * status 'handed_off' on every non-opted_out conversation for the phone so the bot
+ * goes permanently silent for that client — but never clobbers an 'opted_out' row,
+ * so STOP compliance keeps precedence. Failure-tolerant: logs and continues.
+ */
+export async function markConversationHandedOff(
+  phone: string,
+  botId: string = BOT_ID
+): Promise<void> {
+  const { error } = await supabase
+    .from("text_conversations")
+    .update({ status: "handed_off" })
+    .eq("bot_id", botId)
+    .eq("phone_number", phone)
+    .neq("status", "opted_out");
+  if (error) {
+    logger.error("Failed to mark conversation handed off", { phone, error: error.message });
+  }
+}
+
+/**
+ * True when this phone has been handed off to a human on this bot (any 'handed_off'
+ * conversation). Handoff is permanent and per bot+number: once set the bot must not
+ * reply or send campaign texts to that client again. Failure-tolerant: on a query
+ * error returns true (fail CLOSED) so a DB blip never resumes texting a client a
+ * human is handling — mirrors isPhoneOptedOut.
+ */
+export async function isPhoneHandedOff(
+  phone: string,
+  botId: string = BOT_ID
+): Promise<boolean> {
+  const { count, error } = await supabase
+    .from("text_conversations")
+    .select("id", { count: "exact", head: true })
+    .eq("bot_id", botId)
+    .eq("phone_number", phone)
+    .eq("status", "handed_off");
+  if (error) {
+    logger.error("Failed to check handed-off status; failing closed", {
+      phone,
+      error: error.message,
+    });
+    return true;
+  }
+  return (count ?? 0) > 0;
+}
+
+/**
+ * The most recent OUTBOUND message this bot recorded for the phone's newest thread,
+ * or null. Used by the agent-takeover detector to recognize the bot's OWN outbound
+ * echo in the RC webhook (a body match within a short window). Failure-tolerant:
+ * returns null on any error so an undetectable echo simply falls through to the
+ * id-match / handoff logic rather than crashing the webhook.
+ */
+export async function getLastBotOutbound(
+  phone: string,
+  botId: string = BOT_ID
+): Promise<{ body: string; created_at: string | null } | null> {
+  const convo = await findConversationByPhone(phone, botId);
+  if (!convo) return null;
+  const { data, error } = await supabase
+    .from("text_messages")
+    .select("body, created_at")
+    .eq("bot_id", botId)
+    .eq("conversation_id", convo.id)
+    .eq("direction", "outbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    logger.error("Failed to load last bot outbound message", { phone, error: error.message });
+    return null;
+  }
+  if (!data) return null;
+  return { body: (data as { body: string }).body, created_at: (data as { created_at: string | null }).created_at };
 }
 
 /**

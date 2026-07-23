@@ -15,10 +15,13 @@ import {
   findConversationByPhone,
   getActiveOutreachTemplates,
   getConversationMessages,
+  getLastBotOutbound,
   getTextStages,
   hasProviderMessage,
   insertTextMessage,
+  isHandedOff,
   isPhoneOptedOut,
+  markConversationHandedOff,
   updateConversationStatus,
   type TextChannel,
   type TextConversationRow,
@@ -114,6 +117,16 @@ export async function handleInboundSms(input: {
     return;
   }
 
+  // 2b. Handoff gate: a human agent took over this client's thread. STOP/HELP above
+  //     are still honored (compliance), but from here the bot must not run the engine
+  //     or reply. Ordered AFTER STOP/HELP, BEFORE the engine, per spec.
+  if (isHandedOff(convo.status)) {
+    logger.info("Inbound ignored: conversation handed off to human", {
+      conversationId: convo.id,
+    });
+    return;
+  }
+
   const [{ text, business }, lead, stages, leadFields, history] = await Promise.all([
     resolveEffectiveConfig(),
     findLeadByPhone(from),
@@ -166,6 +179,55 @@ export async function handleInboundSms(input: {
 }
 
 /**
+ * Body-match fallback window: an Outbound RC event whose body equals the bot's most
+ * recent outbound to that client within this many ms is treated as the bot's own echo
+ * (not a human takeover). Primary until id-capture backfills provider_message_id on
+ * every send. 120s per spec.
+ */
+const ECHO_BODY_MATCH_WINDOW_MS = 120_000;
+
+/**
+ * Handle an OUTBOUND RC SMS event (from the bot's RC number to a single client). It is
+ * EITHER the bot's own send echoed back by RC, OR a human agent typing in the RC app.
+ * Distinguish:
+ *   - id match: the event id equals a bot-recorded outbound provider_message_id → echo.
+ *   - body-match fallback: body equals the most recent bot-sent outbound to that client
+ *     within the last 120s → echo.
+ *   - otherwise → HUMAN AGENT TAKEOVER: mark the client's conversation handed_off so the
+ *     bot goes permanently silent for that client.
+ * Never throws — the caller has already acked 200 semantics; a failure here is logged.
+ */
+export async function handleAgentTakeover(input: {
+  eventId: string;
+  clientPhone: string;
+  body: string;
+  now?: Date;
+}): Promise<void> {
+  const { eventId, clientPhone, body } = input;
+  const now = input.now ?? new Date();
+
+  // id match: our own recorded outbound carries this provider_message_id.
+  if (eventId && (await hasProviderMessage(eventId))) {
+    logger.info("Outbound RC event is the bot's own echo (id match); ignoring");
+    return;
+  }
+
+  // body-match fallback within the window.
+  const last = await getLastBotOutbound(clientPhone);
+  if (last && last.body === body && last.created_at) {
+    const sentAt = new Date(last.created_at).getTime();
+    if (Number.isFinite(sentAt) && now.getTime() - sentAt <= ECHO_BODY_MATCH_WINDOW_MS) {
+      logger.info("Outbound RC event matches recent bot body within window; ignoring echo");
+      return;
+    }
+  }
+
+  // Human agent takeover: mute the bot for this client, permanently.
+  await markConversationHandedOff(clientPhone);
+  logger.info("Agent takeover detected; muting bot for conversation", { phone: clientPhone });
+}
+
+/**
  * Bot-INITIATED opener (missed-call follow-up / web-lead outreach). Shared by both
  * triggers. Enforces: text bot enabled, the relevant sub-toggle, opt-out, and quiet
  * hours (8am–9pm bot timezone) BEFORE creating a conversation or sending. Sends the
@@ -194,7 +256,7 @@ async function sendOpener(input: {
     logger.info("SMS opener skipped: number opted out", { trigger });
     return false;
   }
-  if (!isWithinTextingWindow(input.now ?? new Date(), text.timezone)) {
+  if (!isWithinTextingWindow(input.now ?? new Date(), text.timezone, text.windowStartHour, text.windowEndHour)) {
     // Quiet hours: do not send now. Kept simple per spec — we skip rather than queue;
     // a later inbound reply (always allowed) resumes engagement.
     logger.info("SMS opener skipped: outside quiet-hours window", {

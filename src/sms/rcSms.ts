@@ -23,6 +23,12 @@ export interface RcSendResult {
   sent: boolean;
   /** Why the send was skipped/failed (no_number / error). Absent on success. */
   reason?: string;
+  /**
+   * RingCentral message-store id of the created message, read from the send
+   * response. Recorded on the bot's own outbound row so a later Outbound webhook
+   * echo is id-matchable (and thus not mistaken for a human-agent takeover).
+   */
+  providerMessageId?: string;
 }
 
 /**
@@ -53,12 +59,15 @@ export async function sendRcSms(input: {
     return { sent: false, reason: "no_number" };
   }
 
+  let providerMessageId: string | undefined;
   try {
-    await rcPost(smsEndpoint(text.rcSmsExtensionId), {
+    const resp = await rcPost(smsEndpoint(text.rcSmsExtensionId), {
       from: { phoneNumber: from.trim() },
       to: [{ phoneNumber: input.to }],
       text: input.text,
     });
+    const id = (resp as { id?: unknown } | null | undefined)?.id;
+    if (id != null) providerMessageId = String(id);
   } catch (err) {
     if (text.rcSmsExtensionId && isInsufficientPermissions(err)) {
       logger.error(
@@ -75,5 +84,5 @@ export async function sendRcSms(input: {
     }
     return { sent: false, reason: "error" };
   }
-  return { sent: true };
+  return { sent: true, providerMessageId };
 }

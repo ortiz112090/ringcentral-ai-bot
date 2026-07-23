@@ -123,6 +123,16 @@ export interface BotConfigRow {
   web_lead_text_enabled: boolean | null;
   /** IANA timezone for quiet-hours enforcement (default 'America/Los_Angeles'). */
   timezone: string | null;
+  /**
+   * Per-bot texting send-window START hour (0–23, local to text_timezone; default 8).
+   * Gates BOT-INITIATED sends only. Nullable/absent-tolerant so older schemas resolve
+   * to the 8/21 defaults.
+   */
+  text_window_start_hour: number | null;
+  /** Per-bot texting send-window END hour (0–23, exclusive; default 21). */
+  text_window_end_hour: number | null;
+  /** IANA timezone for the texting send-window (default 'America/Los_Angeles'). */
+  text_timezone: string | null;
   // ---- Bot roles + campaigns (see migration 0010_campaigns.sql) ----
   /**
    * Role gate: answer_calls | outbound_calls | answer_and_followup | texting.

@@ -25,6 +25,9 @@ const updateConversationStatus = vi.fn(async () => {});
 const getConversationMessages = vi.fn(async () => []);
 const getTextStages = vi.fn(async () => []);
 const getActiveOutreachTemplates = vi.fn(async () => [] as any[]);
+const hasProviderMessage = vi.fn(async () => false);
+const getLastBotOutbound = vi.fn(async () => null as any);
+const markConversationHandedOff = vi.fn(async () => {});
 vi.mock("./smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
   createConversation: (...a: any[]) => createConversation(...a),
@@ -34,6 +37,10 @@ vi.mock("./smsQueries", () => ({
   getConversationMessages: (...a: any[]) => getConversationMessages(...a),
   getTextStages: (...a: any[]) => getTextStages(...a),
   getActiveOutreachTemplates: (...a: any[]) => getActiveOutreachTemplates(...a),
+  hasProviderMessage: (...a: any[]) => hasProviderMessage(...a),
+  getLastBotOutbound: (...a: any[]) => getLastBotOutbound(...a),
+  markConversationHandedOff: (...a: any[]) => markConversationHandedOff(...a),
+  isHandedOff: (status: string | null | undefined) => status === "handed_off",
 }));
 
 const sendSms = vi.fn(async () => ({ sent: true }));
@@ -56,6 +63,7 @@ vi.mock("../twilio/client", () => ({
 
 import {
   handleInboundSms,
+  handleAgentTakeover,
   sendMissedCallText,
   sendWebLeadText,
   buildOpenerText,
@@ -139,6 +147,74 @@ describe("handleInboundSms", () => {
     expect(messagesCreate).toHaveBeenCalledWith(
       expect.objectContaining({ from: "+15550001111", to: "+15559990000" })
     );
+  });
+});
+
+describe("handleInboundSms — agent-takeover handoff gate (Part B3)", () => {
+  const handedOffConvo = { id: "conv-ho", phone_number: "+15557778888", status: "handed_off" };
+
+  it("does NOT run the engine or reply when the conversation is handed off", async () => {
+    findConversationByPhone.mockResolvedValue(handedOffConvo as any);
+    await handleInboundSms({ from: "+15557778888", body: "are you there?" });
+    expect(runSmsTurn).not.toHaveBeenCalled();
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it("still records a STOP as opt-out even when handed off (compliance wins)", async () => {
+    findConversationByPhone.mockResolvedValue(handedOffConvo as any);
+    await handleInboundSms({ from: "+15557778888", body: "STOP" });
+    expect(updateConversationStatus).toHaveBeenCalledWith("conv-ho", "opted_out");
+    expect(runSmsTurn).not.toHaveBeenCalled();
+  });
+
+  it("still answers HELP even when handed off (compliance wins)", async () => {
+    findConversationByPhone.mockResolvedValue(handedOffConvo as any);
+    await handleInboundSms({ from: "+15557778888", body: "HELP" });
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    expect(runSmsTurn).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleAgentTakeover (Part B2)", () => {
+  it("id match (known bot providerMessageId) → ignored, no handoff", async () => {
+    hasProviderMessage.mockResolvedValueOnce(true);
+    await handleAgentTakeover({ eventId: "rc-echo-1", clientPhone: "+15557778888", body: "our own send" });
+    expect(markConversationHandedOff).not.toHaveBeenCalled();
+  });
+
+  it("body match within 120s → treated as bot echo, no handoff", async () => {
+    const now = new Date("2026-07-21T12:02:00Z");
+    getLastBotOutbound.mockResolvedValueOnce({
+      body: "hello from the bot",
+      created_at: "2026-07-21T12:01:00Z", // 60s earlier
+    } as any);
+    await handleAgentTakeover({
+      eventId: "rc-x",
+      clientPhone: "+15557778888",
+      body: "hello from the bot",
+      now,
+    });
+    expect(markConversationHandedOff).not.toHaveBeenCalled();
+  });
+
+  it("body match OUTSIDE the 120s window → not an echo → handoff", async () => {
+    const now = new Date("2026-07-21T12:05:00Z");
+    getLastBotOutbound.mockResolvedValueOnce({
+      body: "hello from the bot",
+      created_at: "2026-07-21T12:01:00Z", // 240s earlier
+    } as any);
+    await handleAgentTakeover({
+      eventId: "rc-x",
+      clientPhone: "+15557778888",
+      body: "hello from the bot",
+      now,
+    });
+    expect(markConversationHandedOff).toHaveBeenCalledWith("+15557778888");
+  });
+
+  it("unknown id and no matching body → human takeover → marks handed_off", async () => {
+    await handleAgentTakeover({ eventId: "rc-unknown", clientPhone: "+15557778888", body: "hi this is a human" });
+    expect(markConversationHandedOff).toHaveBeenCalledWith("+15557778888");
   });
 });
 
