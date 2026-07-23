@@ -123,22 +123,63 @@ describe("getKnownConversationPhones", () => {
 
 describe("findOrCreateVelocifyCampaign", () => {
   it("returns the existing campaign and updates pace when it changed", async () => {
-    results.push({ data: { id: "c1", pace_per_hour: 50, name: VELOCIFY_CAMPAIGN_NAME } }); // select
+    results.push({
+      data: { id: "c1", pace_per_hour: 50, status: "running", name: VELOCIFY_CAMPAIGN_NAME },
+    }); // select
     results.push({ data: null, error: null }); // pace update
     const row = await findOrCreateVelocifyCampaign(100);
     expect(row?.id).toBe("c1");
     expect(row?.pace_per_hour).toBe(100);
-    // Second call is the pace update on campaigns.
+    // Second call is the pace update on campaigns; status already running → untouched.
     expect(calls[1].op).toBe("update");
     expect(calls[1].payload).toEqual({ pace_per_hour: 100 });
     expect(calls[1].eqs.id).toBe("c1");
+    expect(calls[1].eqs.bot_id).toBe("bot-1");
   });
 
   it("does NOT update pace when it already matches", async () => {
-    results.push({ data: { id: "c1", pace_per_hour: 100, name: VELOCIFY_CAMPAIGN_NAME } });
+    results.push({
+      data: { id: "c1", pace_per_hour: 100, status: "running", name: VELOCIFY_CAMPAIGN_NAME },
+    });
     const row = await findOrCreateVelocifyCampaign(100);
     expect(row?.pace_per_hour).toBe(100);
     expect(calls).toHaveLength(1); // only the select
+  });
+
+  it("re-activates a reused campaign the worker had auto-completed", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 100, status: "completed", name: VELOCIFY_CAMPAIGN_NAME },
+    }); // select
+    results.push({ data: null, error: null }); // status update
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("running");
+    // Pace matches, so only status is written — one scoped update.
+    expect(calls[1].op).toBe("update");
+    expect(calls[1].payload).toEqual({ status: "running" });
+    expect(calls[1].eqs.id).toBe("c1");
+    expect(calls[1].eqs.bot_id).toBe("bot-1");
+  });
+
+  it("folds a status reset and pace change into one update", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 50, status: "completed", name: VELOCIFY_CAMPAIGN_NAME },
+    }); // select
+    results.push({ data: null, error: null }); // combined update
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("running");
+    expect(row?.pace_per_hour).toBe(100);
+    expect(calls).toHaveLength(2); // select + single update
+    expect(calls[1].op).toBe("update");
+    expect(calls[1].payload).toEqual({ pace_per_hour: 100, status: "running" });
+  });
+
+  it("leaves a reused running campaign untouched", async () => {
+    results.push({
+      data: { id: "c1", pace_per_hour: 100, status: "running", name: VELOCIFY_CAMPAIGN_NAME },
+    });
+    const row = await findOrCreateVelocifyCampaign(100);
+    expect(row?.status).toBe("running");
+    expect(calls).toHaveLength(1); // only the select — no status churn
   });
 
   it("creates a running text_outreach campaign when none exists", async () => {
