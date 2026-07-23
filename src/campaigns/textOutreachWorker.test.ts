@@ -129,13 +129,11 @@ describe("personalizeTemplate", () => {
 });
 
 describe("buildFirstMessage", () => {
-  it("appends the STOP notice when the template lacks it", () => {
-    expect(buildFirstMessage("Hi {first_name}!", "Ann")).toBe(
-      "Hi Ann! Reply STOP to opt out."
-    );
+  it("personalizes and sends the template VERBATIM (no opt-out suffix appended)", () => {
+    expect(buildFirstMessage("Hi {first_name}!", "Ann")).toBe("Hi Ann!");
   });
 
-  it("does NOT double-append when the template already mentions STOP", () => {
+  it("leaves a template that already mentions STOP untouched", () => {
     const msg = buildFirstMessage("Hi {first_name}, reply STOP to end.", "Ann");
     expect(msg).toBe("Hi Ann, reply STOP to end.");
     expect(msg.match(/stop/gi)?.length).toBe(1);
@@ -180,11 +178,11 @@ describe("processTextOutreachCampaign", () => {
     expect(setContactStatus).toHaveBeenCalledWith(2, "sent", "delivered_attempt");
   });
 
-  it("sends the personalized, STOP-suffixed first message on the conversation", async () => {
+  it("sends the personalized first message VERBATIM on the conversation", async () => {
     claimPendingContacts.mockResolvedValueOnce([contact(7, "Dana", "+15551234567")]);
     await processTextOutreachCampaign(campaign, ctx);
     const arg = sendSms.mock.calls[0][0] as any;
-    expect(arg.body).toBe("Hi Dana, following up! Reply STOP to opt out.");
+    expect(arg.body).toBe("Hi Dana, following up!");
     expect(arg.firstBotInitiated).toBe(false);
     expect(arg.conversation.phone_number).toBe("+15551234567");
   });

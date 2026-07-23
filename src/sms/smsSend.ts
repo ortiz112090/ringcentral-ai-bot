@@ -1,7 +1,6 @@
 import { resolveEffectiveConfig } from "../config";
 import { logger } from "../logger";
 import { getTwilioClient } from "../twilio/client";
-import { OPT_OUT_SUFFIX } from "./smsCompliance";
 import { sendRcSms } from "./rcSms";
 import {
   insertTextMessage,
@@ -19,11 +18,11 @@ export interface SendResult {
 /**
  * Send ONE outbound SMS on a conversation and record it.
  *
- * Compliance gates run FIRST, on every send:
+ * Compliance gate runs FIRST, on every send:
  *   - If the number has opted out on this bot, we NEVER send (hard stop).
- *   - `firstBotInitiated` (missed-call / web-lead openers) appends the mandatory
- *     "Reply STOP to opt out." suffix if the model didn't already include it. Not
- *     added on replies to inbound texts (the user initiated; they can reply STOP).
+ *
+ * The body is sent VERBATIM — no prefix or opt-out suffix is auto-injected. The
+ * operator's opener/template is responsible for any company-name or STOP language.
  *
  * Reply channel follows the conversation: a 'ringcentral' conversation sends via
  * the RingCentral client (sendRcSms), everything else via this tenant's Twilio REST
@@ -47,7 +46,7 @@ export async function sendSms(input: {
     return { sent: false, reason: "opted_out" };
   }
 
-  const body = input.firstBotInitiated ? withOptOutSuffix(input.body) : input.body;
+  const body = input.body;
 
   // Reply out the SAME channel the conversation lives on.
   const result =
@@ -110,11 +109,4 @@ async function sendViaRingCentral(
     return { sent: false, reason: res.reason ?? "error" };
   }
   return { sent: true };
-}
-
-/** Append the STOP suffix unless the body already mentions opting out via STOP. */
-export function withOptOutSuffix(body: string): string {
-  const trimmed = (body ?? "").trim();
-  if (/\bstop\b/i.test(trimmed)) return trimmed; // already tells them how to opt out
-  return `${trimmed} ${OPT_OUT_SUFFIX}`.trim();
 }

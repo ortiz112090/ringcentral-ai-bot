@@ -13,7 +13,7 @@ import {
   type TextConversationRow,
   type TextOutreachTemplateRow,
 } from "../sms/smsQueries";
-import { sendSms, withOptOutSuffix } from "../sms/smsSend";
+import { sendSms } from "../sms/smsSend";
 import {
   claimPendingContacts,
   completeCampaign,
@@ -57,15 +57,14 @@ export function personalizeTemplate(
 }
 
 /**
- * Build the outbound FIRST message: personalize, then append the mandatory
- * ' Reply STOP to opt out.' notice unless the template already tells the recipient
- * how to STOP (reuses withOptOutSuffix, so no double-append).
+ * Build the outbound FIRST message: personalize the template and send it VERBATIM.
+ * No opt-out suffix is appended — the operator's template owns any STOP language.
  */
 export function buildFirstMessage(
   templateText: string,
   firstName: string | null | undefined
 ): string {
-  return withOptOutSuffix(personalizeTemplate(templateText, firstName));
+  return personalizeTemplate(templateText, firstName);
 }
 
 /**
@@ -198,8 +197,8 @@ async function sendToContact(
       return;
     }
 
-    // Channel-routed send (records the outbound text_messages row). The STOP notice
-    // is already appended above, so we don't ask sendSms to add it again.
+    // Channel-routed send (records the outbound text_messages row). The template is
+    // sent verbatim — no opt-out suffix is auto-appended.
     const result = await sendSms({ conversation, body, firstBotInitiated: false });
     if (result.sent) {
       await setContactStatus(contact.id, "sent", "delivered_attempt");
