@@ -179,6 +179,98 @@ describe("parseReportRows (lenient, namespace-quirk tolerant)", () => {
     expect(parseReportRows("")).toEqual([]);
     expect(parseReportRows("<html>nope</html>")).toEqual([]);
   });
+  it("falls back to <Row>/<Field> when no <Result> blocks are present", () => {
+    // FIXTURE_XML carries no <Result> elements, so it must parse via the legacy path.
+    expect(FIXTURE_XML).not.toContain("<Result");
+    const rows = parseReportRows(FIXTURE_XML);
+    expect(rows).toHaveLength(3);
+    expect(rows[1][3]).toBe("Dana & Co");
+  });
+});
+
+// ---- A fixture mirroring the REAL GetReportResults shape: <Result> rows with NAMED
+// child elements where blank cells are OMITTED (not self-closed). Master column order
+// must be [DateAdded, Status, User, FirstName, LastName, DayWorkPhone, Email, ZipCode]
+// so D(3)=FirstName and F(5)=DayWorkPhone for EVERY row despite omitted cells. Includes
+// a namespace-prefixed <Result>, a self-closing tag, and an &amp; entity.
+const RESULT_XML = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <GetReportResultsResponse xmlns="https://service.leads360.com/">
+      <GetReportResultsResult>
+        <ReportResults reportId="87" xmlns="">
+          <Result>
+            <DateAdded>2026-06-23T06:03:43</DateAdded>
+            <Status>Policy Sold</Status>
+            <User>Lobato, Rudy</User>
+            <FirstName>Olivia &amp; Co</FirstName>
+            <LastName>Stowers</LastName>
+            <DayWorkPhone>(636) 487-8388</DayWorkPhone>
+            <Email>olivia@example.com</Email>
+            <ZipCode>63301</ZipCode>
+          </Result>
+          <Result>
+            <DateAdded>2026-06-24T09:10:11</DateAdded>
+            <Status>New</Status>
+            <User>Smith, Ann</User>
+            <FirstName>Marcus</FirstName>
+            <DayWorkPhone>5551234567</DayWorkPhone>
+          </Result>
+          <ns:Result>
+            <DateAdded>2026-06-25T01:02:03</DateAdded>
+            <Status>New</Status>
+            <User>Doe, Jane</User>
+            <DayWorkPhone>5559998888</DayWorkPhone>
+          </ns:Result>
+          <Result>
+            <DateAdded>2026-06-26T01:02:03</DateAdded>
+            <Status>New</Status>
+            <User>Roe, Rick</User>
+            <FirstName>Selfie</FirstName>
+            <LastName/>
+            <DayWorkPhone>5557776666</DayWorkPhone>
+          </Result>
+        </ReportResults>
+      </GetReportResultsResult>
+    </GetReportResultsResponse>
+  </soap:Body>
+</soap:Envelope>`;
+
+describe("parseReportRows (real <Result> shape with omitted blank cells)", () => {
+  it("builds the master column order from merged per-row tag sequences", () => {
+    const rows = parseReportRows(RESULT_XML);
+    expect(rows).toHaveLength(4);
+    // Every row is emitted at the full master length (8 columns).
+    for (const row of rows) expect(row).toHaveLength(8);
+  });
+
+  it("maps column letters to element NAMES so D=FirstName / F=DayWorkPhone for EVERY row", () => {
+    const rows = parseReportRows(RESULT_XML);
+    const D = columnLetterToIndex("D"); // FirstName
+    const F = columnLetterToIndex("F"); // DayWorkPhone
+    // Full 8-tag row: entity decoded, no shift.
+    expect(rows[0][D]).toBe("Olivia & Co");
+    expect(rows[0][F]).toBe("(636) 487-8388");
+    // Row missing LastName/Email/ZipCode: DayWorkPhone still lands at F, not shifted up.
+    expect(rows[1][D]).toBe("Marcus");
+    expect(rows[1][F]).toBe("5551234567");
+    // Namespace-prefixed row missing FirstName entirely → "" at D (→ excluded_name).
+    expect(rows[2][D]).toBe("");
+    expect(rows[2][F]).toBe("5559998888");
+    // Self-closing <LastName/> → "" at E, FirstName/phone unaffected.
+    expect(rows[3][columnLetterToIndex("E")]).toBe("");
+    expect(rows[3][D]).toBe("Selfie");
+    expect(rows[3][F]).toBe("5557776666");
+  });
+
+  it("places DateAdded/Status/User at A/B/C and Email/ZipCode at G/H", () => {
+    const rows = parseReportRows(RESULT_XML);
+    expect(rows[0][columnLetterToIndex("A")]).toBe("2026-06-23T06:03:43");
+    expect(rows[0][columnLetterToIndex("B")]).toBe("Policy Sold");
+    expect(rows[0][columnLetterToIndex("C")]).toBe("Lobato, Rudy");
+    expect(rows[0][columnLetterToIndex("G")]).toBe("olivia@example.com");
+    expect(rows[0][columnLetterToIndex("H")]).toBe("63301");
+  });
 });
 
 describe("normalizePhone", () => {
@@ -402,5 +494,33 @@ describe("runSync happy path (find-or-create + dedupe + insert)", () => {
     expect(res.accepted).toBe(true);
     expect(res.counts?.added).toBe(0);
     expect(insertPendingContacts).not.toHaveBeenCalled();
+  });
+});
+
+describe("runSync end-to-end on the REAL <Result> shape", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, text: async () => RESULT_XML })));
+  });
+
+  it("counts the no-FirstName row as excluded_name and inserts the rest with FirstName from D", async () => {
+    const res = await runSync();
+    expect(res.accepted).toBe(true);
+    expect(res.counts).toEqual({
+      fetched: 4,
+      excluded_name: 1, // the namespace-prefixed row that omitted FirstName → "" at D
+      excluded_phone: 0,
+      duplicates: 0,
+      already_known: 0,
+      added: 3, // Olivia & Co, Marcus, Selfie
+    });
+    expect(insertPendingContacts).toHaveBeenCalledWith(
+      "camp-velocify",
+      [
+        { first_name: "Olivia & Co", phone_number: "+16364878388" },
+        { first_name: "Marcus", phone_number: "+15551234567" },
+        { first_name: "Selfie", phone_number: "+15557776666" },
+      ],
+      expect.any(Number)
+    );
   });
 });

@@ -139,15 +139,48 @@ export function columnLetterToIndex(letter: string): number {
 }
 
 /**
- * Lenient parser for a GetReportResults response → array of positional string cells
- * per row. The real payload nests rows under GetReportResultsResult → ReportResults
- * and inner namespace prefixes/resets break strict XML parsers, so we extract with
- * tolerant regex: each <Row> (any namespace prefix) yields its ordered <Field> cells
- * (self-closing = empty). Values are XML-decoded and trimmed. Never throws — a shape
- * it can't recognize simply yields [].
+ * Extract the ordered (tagName, value) child pairs from one <Result> block's inner
+ * XML. Handles both open/close pairs (`<Tag>value</Tag>`) and self-closing empties
+ * (`<Tag/>` → ""), preserving document order. Values are XML-decoded and trimmed.
  */
-export function parseReportRows(xml: string): string[][] {
-  if (typeof xml !== "string" || xml.trim() === "") return [];
+function extractResultChildren(inner: string): Array<[string, string]> {
+  const childRe = /<(\w+)(?:\s[^>]*)?>([\s\S]*?)<\/\1>|<(\w+)\s*\/>/g;
+  const pairs: Array<[string, string]> = [];
+  let m: RegExpExecArray | null;
+  while ((m = childRe.exec(inner)) !== null) {
+    if (m[1] !== undefined) pairs.push([m[1], decodeXml(m[2] ?? "").trim()]);
+    else if (m[3] !== undefined) pairs.push([m[3], ""]);
+  }
+  return pairs;
+}
+
+/**
+ * Merge one row's ordered tag sequence into the running master column order. Each
+ * row's tags are a subsequence of the report's full column order, so we walk the row
+ * and, for any tag not yet in master, insert it right after its nearest preceding
+ * known neighbor (or append at end when there is none). Mutates `master`.
+ */
+function mergeTagOrder(master: string[], seq: string[]): void {
+  let anchor = -1; // index in master of the last tag we matched/inserted
+  for (const tag of seq) {
+    const idx = master.indexOf(tag);
+    if (idx !== -1) {
+      anchor = idx;
+    } else if (anchor === -1) {
+      master.push(tag);
+      anchor = master.length - 1;
+    } else {
+      master.splice(anchor + 1, 0, tag);
+      anchor += 1;
+    }
+  }
+}
+
+/**
+ * Legacy fallback: extract ordered <Field> cells from each <Row> (any namespace
+ * prefix), self-closing = empty. Kept as cheap insurance for the old response shape.
+ */
+function parseRowFieldRows(xml: string): string[][] {
   const rows: string[][] = [];
   const rowRe = /<(?:\w+:)?Row\b[^>]*>([\s\S]*?)<\/(?:\w+:)?Row>/gi;
   // A field is either a self-closing empty element or an open/close pair.
@@ -163,6 +196,52 @@ export function parseReportRows(xml: string): string[][] {
     }
     rows.push(cells);
   }
+  return rows;
+}
+
+/**
+ * Lenient parser for a GetReportResults response → array of fixed-length positional
+ * string cells per row. The real payload nests <Result> rows under ReportResults, each
+ * carrying NAMED child elements (DateAdded, Status, …) — and blank cells are OMITTED,
+ * not self-closed, so naive positional extraction shifts columns. So we (1) pull each
+ * <Result> block's ordered (tag,value) pairs, (2) merge the per-row tag sequences into
+ * one master column order, then (3) emit every row at the master's length so column
+ * letters map to element names consistently (A→DateAdded, D→FirstName, F→DayWorkPhone,
+ * …), inserting "" for any tag a given row omitted. Falls back to the legacy <Row>/
+ * <Field> shape when no <Result> blocks are present. Never throws — unrecognized → [].
+ */
+export function parseReportRows(xml: string): string[][] {
+  if (typeof xml !== "string" || xml.trim() === "") return [];
+
+  // Phase 1: extract each <Result> row as ordered (tag, value) pairs.
+  const resultRe = /<(?:\w+:)?Result\b[^>]*>([\s\S]*?)<\/(?:\w+:)?Result>/gi;
+  const rowPairs: Array<Array<[string, string]>> = [];
+  let rm: RegExpExecArray | null;
+  while ((rm = resultRe.exec(xml)) !== null) {
+    rowPairs.push(extractResultChildren(rm[1]));
+  }
+
+  // No <Result> rows → legacy <Row>/<Field> shape (cheap insurance).
+  if (rowPairs.length === 0) return parseRowFieldRows(xml);
+
+  // Phase 2: build the master column order by merging per-row tag sequences,
+  // seeding with the row that has the most distinct tags so the common case
+  // (a full row) yields the complete order in one pass.
+  const seqs = rowPairs.map((pairs) => pairs.map(([tag]) => tag));
+  const distinct = (s: string[]) => new Set(s).size;
+  const master: string[] = [];
+  for (const seq of [...seqs].sort((a, b) => distinct(b) - distinct(a))) {
+    mergeTagOrder(master, seq);
+  }
+
+  // Phase 3: emit fixed-length positional rows (missing tag → "").
+  const rows = rowPairs.map((pairs) => {
+    const byTag = new Map(pairs);
+    return master.map((tag) => byTag.get(tag) ?? "");
+  });
+
+  // Column NAMES only (never cell values) — aids future column-letter configuration.
+  logger.info("Velocify report parsed", { botId: BOT_ID, columns: master });
   return rows;
 }
 
