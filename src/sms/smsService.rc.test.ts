@@ -40,6 +40,9 @@ vi.mock("./smsQueries", () => ({
   updateConversationStatus: (...a: any[]) => updateConversationStatus(...a),
   getConversationMessages: (...a: any[]) => getConversationMessages(...a),
   getTextStages: (...a: any[]) => getTextStages(...a),
+  getLastBotOutbound: vi.fn(async () => null),
+  markConversationHandedOff: vi.fn(async () => {}),
+  isHandedOff: (status: string | null | undefined) => status === "handed_off",
 }));
 
 const sendSms = vi.fn(async () => ({ sent: true }));

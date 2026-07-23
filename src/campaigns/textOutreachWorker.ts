@@ -8,6 +8,7 @@ import {
   findConversationByPhone,
   getActiveOutreachTemplates,
   isPhoneDeclined,
+  isPhoneHandedOff,
   isPhoneOptedOut,
   type TextChannel,
   type TextConversationRow,
@@ -183,6 +184,18 @@ async function sendToContact(
       return;
     }
 
+    // Handoff gate: never re-text a client a human agent took over (terminal, same
+    // as opted_out/declined — the bot stays silent for that client permanently).
+    if (await isPhoneHandedOff(contact.phone_number)) {
+      await setContactStatus(contact.id, "skipped", "handed_off");
+      logger.info("Text-outreach skipped: conversation handed off to human", {
+        botId: BOT_ID,
+        campaignId: campaign.id,
+        contactId: contact.id,
+      });
+      return;
+    }
+
     const template = pickTemplate(ctx.templates);
     const body = buildFirstMessage(template.template_text, contact.first_name);
 
@@ -256,8 +269,9 @@ export async function runTextOutreachTick(now: Date = new Date()): Promise<void>
     // Role gate (fresh per tick): text-outreach runs only for the texting role.
     if (!roleAllows(cfg.botRole, "campaign_texts")) return;
 
-    // Quiet hours: skip the whole tick outside 8am–9pm in the bot's timezone.
-    if (!isWithinTextingWindow(now, cfg.text.timezone)) {
+    // Quiet hours: skip the whole tick outside the configured send-window in the
+    // bot's timezone (per-bot start/end hours, default 8am–9pm).
+    if (!isWithinTextingWindow(now, cfg.text.timezone, cfg.text.windowStartHour, cfg.text.windowEndHour)) {
       logger.info("Text-outreach tick skipped: outside quiet-hours window", {
         botId: BOT_ID,
         timezone: cfg.text.timezone,

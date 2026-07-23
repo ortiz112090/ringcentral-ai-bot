@@ -202,6 +202,10 @@ export interface EffectiveConfig {
     webLeadEnabled: boolean;
     /** IANA timezone for quiet-hours (default 'America/Los_Angeles'). */
     timezone: string;
+    /** Texting send-window START hour (0–23, local to timezone; default 8). */
+    windowStartHour: number;
+    /** Texting send-window END hour (0–23, exclusive; default 21). */
+    windowEndHour: number;
   };
   /**
    * Role gate for this tenant (bot_config.bot_role), normalized to a valid BotRole.
@@ -562,8 +566,14 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       // Sub-toggles default ON: only an explicit false disables them.
       missedCallEnabled: botConfig?.missed_call_text_enabled !== false,
       webLeadEnabled: botConfig?.web_lead_text_enabled !== false,
+      // Send-window timezone: env-first, then the dedicated text_timezone column,
+      // then the legacy shared `timezone` column, then the default.
       timezone:
-        envFirst("BOT_TIMEZONE", botConfig?.timezone) ?? "America/Los_Angeles",
+        envFirst("BOT_TIMEZONE", botConfig?.text_timezone ?? botConfig?.timezone) ??
+        "America/Los_Angeles",
+      // Per-bot send-window bounds; default 8/21 when the columns are null/absent.
+      windowStartHour: numberOr(botConfig?.text_window_start_hour, 8),
+      windowEndHour: numberOr(botConfig?.text_window_end_hour, 21),
     },
     botRole: normalizeRole(envFirst("BOT_ROLE", botConfig?.bot_role)),
     dropcowboy: {

@@ -14,9 +14,11 @@ vi.mock("../twilio/client", () => ({
 // exercise the Twilio channel (conversation.channel is undefined/'twilio').
 vi.mock("./rcSms", () => ({ sendRcSms: vi.fn(async () => ({ sent: true })) }));
 const isPhoneOptedOut = vi.fn(async () => false);
+const isPhoneHandedOff = vi.fn(async () => false);
 const insertTextMessage = vi.fn(async () => {});
 vi.mock("./smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
+  isPhoneHandedOff: (...a: any[]) => isPhoneHandedOff(...a),
   insertTextMessage: (...a: any[]) => insertTextMessage(...a),
 }));
 
@@ -27,6 +29,7 @@ const convo: any = { id: "conv-1", phone_number: "+15557778888", status: "active
 beforeEach(() => {
   vi.clearAllMocks();
   isPhoneOptedOut.mockResolvedValue(false);
+  isPhoneHandedOff.mockResolvedValue(false);
 });
 
 describe("sendSms opt-out enforcement", () => {
@@ -34,6 +37,14 @@ describe("sendSms opt-out enforcement", () => {
     isPhoneOptedOut.mockResolvedValueOnce(true);
     const res = await sendSms({ conversation: convo, body: "hello" });
     expect(res).toEqual({ sent: false, reason: "opted_out" });
+    expect(messagesCreate).not.toHaveBeenCalled();
+    expect(insertTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("NEVER sends to a handed-off number (agent takeover)", async () => {
+    isPhoneHandedOff.mockResolvedValueOnce(true);
+    const res = await sendSms({ conversation: convo, body: "hello" });
+    expect(res).toEqual({ sent: false, reason: "handed_off" });
     expect(messagesCreate).not.toHaveBeenCalled();
     expect(insertTextMessage).not.toHaveBeenCalled();
   });

@@ -24,9 +24,11 @@ vi.mock("../twilio/client", () => ({ getTwilioAuthToken: vi.fn(async () => "tw")
 
 const handleInboundSms = vi.fn(async () => {});
 const sendWebLeadText = vi.fn(async () => true);
+const handleAgentTakeover = vi.fn(async () => {});
 vi.mock("./smsService", () => ({
   handleInboundSms: (...a: any[]) => handleInboundSms(...a),
   sendWebLeadText: (...a: any[]) => sendWebLeadText(...a),
+  handleAgentTakeover: (...a: any[]) => handleAgentTakeover(...a),
 }));
 
 import { handleRcSmsWebhook, __resetRcDedupeForTests } from "./smsRoutes";
@@ -160,11 +162,66 @@ describe("handleRcSmsWebhook — routing into the shared pipeline", () => {
     });
   });
 
-  it("ignores non-inbound (outbound echo) events", async () => {
+  it("outbound event → delegates to handleAgentTakeover with the client phone (to[0])", async () => {
     const res = fakeRes();
-    await handleRcSmsWebhook(fakeReq({ query: queryAuth, body: inboundEvent({ direction: "Outbound" }) }), res);
+    await handleRcSmsWebhook(
+      fakeReq({
+        query: queryAuth,
+        body: {
+          body: {
+            id: "rc-out-1",
+            direction: "Outbound",
+            from: { phoneNumber: "+15550002222" },
+            to: [{ phoneNumber: "+15557778888" }],
+            subject: "manual agent text",
+          },
+        },
+      }),
+      res
+    );
     expect(res.statusCode).toBe(200);
     expect(handleInboundSms).not.toHaveBeenCalled();
+    expect(handleAgentTakeover).toHaveBeenCalledWith({
+      eventId: "rc-out-1",
+      clientPhone: "+15557778888",
+      body: "manual agent text",
+    });
+  });
+
+  it("dedupes a redelivered OUTBOUND event — detects takeover once", async () => {
+    const evt = {
+      body: {
+        id: "rc-out-dupe",
+        direction: "Outbound",
+        from: { phoneNumber: "+15550002222" },
+        to: [{ phoneNumber: "+15557778888" }],
+        subject: "manual agent text",
+      },
+    };
+    await handleRcSmsWebhook(fakeReq({ query: queryAuth, body: evt }), fakeRes());
+    await handleRcSmsWebhook(fakeReq({ query: queryAuth, body: evt }), fakeRes());
+    expect(handleAgentTakeover).toHaveBeenCalledTimes(1);
+  });
+
+  it("outbound event with no to[0] → 200, no takeover", async () => {
+    const res = fakeRes();
+    await handleRcSmsWebhook(
+      fakeReq({
+        query: queryAuth,
+        body: { body: { id: "rc-out-2", direction: "Outbound", from: { phoneNumber: "+15550002222" }, to: [] } },
+      }),
+      res
+    );
+    expect(res.statusCode).toBe(200);
+    expect(handleAgentTakeover).not.toHaveBeenCalled();
+  });
+
+  it("ignores a non-message / non-SMS event (neither Inbound nor Outbound)", async () => {
+    const res = fakeRes();
+    await handleRcSmsWebhook(fakeReq({ query: queryAuth, body: inboundEvent({ direction: "Fax" }) }), res);
+    expect(res.statusCode).toBe(200);
+    expect(handleInboundSms).not.toHaveBeenCalled();
+    expect(handleAgentTakeover).not.toHaveBeenCalled();
   });
 
   it("dedupes a redelivered message id (in-memory LRU) — processes once", async () => {

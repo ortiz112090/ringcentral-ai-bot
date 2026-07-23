@@ -15,9 +15,11 @@ vi.mock("./rcSms", () => ({
   sendRcSms: (...a: any[]) => sendRcSms(...a),
 }));
 const isPhoneOptedOut = vi.fn(async () => false);
+const isPhoneHandedOff = vi.fn(async () => false);
 const insertTextMessage = vi.fn(async () => {});
 vi.mock("./smsQueries", () => ({
   isPhoneOptedOut: (...a: any[]) => isPhoneOptedOut(...a),
+  isPhoneHandedOff: (...a: any[]) => isPhoneHandedOff(...a),
   insertTextMessage: (...a: any[]) => insertTextMessage(...a),
 }));
 
@@ -29,6 +31,7 @@ const rcConvo: any = { id: "c-rc", phone_number: "+15557778888", channel: "ringc
 beforeEach(() => {
   vi.clearAllMocks();
   isPhoneOptedOut.mockResolvedValue(false);
+  isPhoneHandedOff.mockResolvedValue(false);
   sendRcSms.mockResolvedValue({ sent: true });
 });
 
