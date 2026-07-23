@@ -219,6 +219,27 @@ export interface EffectiveConfig {
     secret: string | undefined;
     brandId: string | undefined;
   };
+  /**
+   * Velocify report-sync settings + credentials. Settings come from the new
+   * bot_config columns (per-tenant, dashboard-editable); credentials come from
+   * api_credentials provider "velocify" (DB-first, env fallback for the primary bot
+   * only via credentialFirst — same isolation rule as the other integrations). Read
+   * fresh per sync so dashboard edits apply on the next tick with no redeploy.
+   */
+  velocify: {
+    enabled: boolean;
+    reportId: string | undefined;
+    firstNameColumn: string;
+    phoneColumn: string;
+    excludedFirstNames: string[];
+    syncIntervalMinutes: number;
+    pacePerHour: number;
+    lastSyncedAt: string | undefined;
+    username: string | undefined;
+    password: string | undefined;
+    /** SOAP endpoint override; undefined → the module default. */
+    endpoint: string | undefined;
+  };
   realtimeVoice: string;
   /**
    * Realtime output speaking rate, resolved env-first
@@ -253,6 +274,36 @@ const VAD_DEFAULTS = {
 /** Numeric bot_config value, or the default when null/undefined/non-finite. */
 function numberOr(value: number | null | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** Velocify sync bot_config defaults (mirror the migration column defaults). */
+const VELOCIFY_DEFAULTS = {
+  firstNameColumn: "D",
+  phoneColumn: "F",
+  excludedFirstNames: ["inbound call"],
+  syncIntervalMinutes: 360,
+  pacePerHour: 100,
+} as const;
+
+/**
+ * Coerce the velocify_excluded_first_names jsonb value into a string[]. Supabase
+ * returns jsonb already parsed; accept an array of strings (a JSON string is parsed
+ * defensively). Anything unusable falls back to the default single-entry list.
+ */
+export function parseExcludedFirstNames(value: unknown): string[] {
+  let raw = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return [...VELOCIFY_DEFAULTS.excludedFirstNames];
+    }
+  }
+  if (Array.isArray(raw)) {
+    const names = raw.filter((v): v is string => typeof v === "string");
+    return names.length > 0 ? names : [...VELOCIFY_DEFAULTS.excludedFirstNames];
+  }
+  return [...VELOCIFY_DEFAULTS.excludedFirstNames];
 }
 
 /** OpenAI Realtime output-speed bounds and default. */
@@ -519,6 +570,38 @@ export async function resolveEffectiveConfig(): Promise<EffectiveConfig> {
       teamId: credentialFirst("DROPCOWBOY_TEAM_ID", getCredential("dropcowboy", "team_id")),
       secret: credentialFirst("DROPCOWBOY_SECRET", getCredential("dropcowboy", "secret")),
       brandId: credentialFirst("DROPCOWBOY_BRAND_ID", getCredential("dropcowboy", "brand_id")),
+    },
+    velocify: {
+      // Only an explicit true enables the sync (mirrors the other kill switches).
+      enabled: botConfig?.velocify_sync_enabled === true,
+      reportId:
+        botConfig?.velocify_report_id && botConfig.velocify_report_id.trim() !== ""
+          ? botConfig.velocify_report_id.trim()
+          : undefined,
+      firstNameColumn:
+        botConfig?.velocify_first_name_column && botConfig.velocify_first_name_column.trim() !== ""
+          ? botConfig.velocify_first_name_column.trim()
+          : VELOCIFY_DEFAULTS.firstNameColumn,
+      phoneColumn:
+        botConfig?.velocify_phone_column && botConfig.velocify_phone_column.trim() !== ""
+          ? botConfig.velocify_phone_column.trim()
+          : VELOCIFY_DEFAULTS.phoneColumn,
+      excludedFirstNames: parseExcludedFirstNames(botConfig?.velocify_excluded_first_names),
+      syncIntervalMinutes: numberOr(
+        botConfig?.velocify_sync_interval_minutes,
+        VELOCIFY_DEFAULTS.syncIntervalMinutes
+      ),
+      pacePerHour: numberOr(botConfig?.velocify_pace_per_hour, VELOCIFY_DEFAULTS.pacePerHour),
+      lastSyncedAt:
+        botConfig?.velocify_last_synced_at && botConfig.velocify_last_synced_at.trim() !== ""
+          ? botConfig.velocify_last_synced_at
+          : undefined,
+      // Credentials: DB (api_credentials provider "velocify") first, env fallback only
+      // for the primary bot (credentialFirst enforces the multi-tenant isolation).
+      username: credentialFirst("VELOCIFY_USERNAME", getCredential("velocify", "username")),
+      password: credentialFirst("VELOCIFY_PASSWORD", getCredential("velocify", "password")),
+      // Endpoint is a non-secret override; DB-only (no env var), undefined → default.
+      endpoint: getCredential("velocify", "endpoint"),
     },
     realtimeVoice:
       envFirst("OPENAI_REALTIME_VOICE", botConfig?.realtime_voice) ?? "alloy",

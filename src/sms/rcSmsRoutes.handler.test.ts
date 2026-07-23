@@ -16,6 +16,10 @@ vi.mock("../db/remoteConfig", () => ({
   loadRemoteConfig: vi.fn(async () => ({ bot: null, botConfig: null, credentials: {} })),
 }));
 vi.mock("./client", () => ({}));
+// smsRoutes now transitively imports the real Supabase client (via velocifySync →
+// velocifyQueries), which reads config at module load. Stub it so that import-time
+// read doesn't fire the config getter before mockConfig initializes.
+vi.mock("../db/supabase", () => ({ supabase: {} }));
 vi.mock("../twilio/client", () => ({ getTwilioAuthToken: vi.fn(async () => "tw") }));
 
 const handleInboundSms = vi.fn(async () => {});

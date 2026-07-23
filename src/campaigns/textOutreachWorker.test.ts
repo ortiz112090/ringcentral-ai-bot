@@ -63,6 +63,13 @@ vi.mock("./campaignQueries", () => ({
   getNewestAttemptedAt: (...a: any[]) => getNewestAttemptedAt(...a),
 }));
 
+const runSync = vi.fn(async () => ({ accepted: true }) as any);
+const isVelocifySyncDue = vi.fn(() => false);
+vi.mock("./velocifySync", () => ({
+  runSync: (...a: any[]) => runSync(...a),
+  isVelocifySyncDue: (...a: any[]) => isVelocifySyncDue(...a),
+}));
+
 import {
   buildFirstMessage,
   personalizeTemplate,
@@ -111,6 +118,8 @@ beforeEach(() => {
   findConversationByPhone.mockResolvedValue(null);
   sendSms.mockResolvedValue({ sent: true });
   getNewestAttemptedAt.mockResolvedValue(null);
+  isVelocifySyncDue.mockReturnValue(false);
+  runSync.mockResolvedValue({ accepted: true });
 });
 
 describe("personalizeTemplate", () => {
@@ -382,5 +391,36 @@ describe("processTextOutreachCampaign send_delay_minutes", () => {
     expect(getNewestAttemptedAt).not.toHaveBeenCalled();
     expect(claimPendingContacts).toHaveBeenCalledWith("camp-1", 2); // ceil(120/60)
     expect(sendSms).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runTextOutreachTick Velocify sync piggyback", () => {
+  const noon = new Date("2026-07-21T12:00:00Z");
+
+  it("runs the sync BEFORE campaign processing when it is due", async () => {
+    isVelocifySyncDue.mockReturnValue(true);
+    getRunningCampaigns.mockResolvedValueOnce([]);
+    await runTextOutreachTick(noon);
+    expect(runSync).toHaveBeenCalledWith(noon);
+    // Campaign processing still proceeds after the sync.
+    expect(getRunningCampaigns).toHaveBeenCalledWith("text_outreach");
+  });
+
+  it("does NOT run the sync when it is not due", async () => {
+    isVelocifySyncDue.mockReturnValue(false);
+    getRunningCampaigns.mockResolvedValueOnce([]);
+    await runTextOutreachTick(noon);
+    expect(runSync).not.toHaveBeenCalled();
+    expect(getRunningCampaigns).toHaveBeenCalled();
+  });
+
+  it("a sync failure does not block normal campaign processing", async () => {
+    isVelocifySyncDue.mockReturnValue(true);
+    runSync.mockRejectedValueOnce(new Error("sync boom"));
+    getRunningCampaigns.mockResolvedValueOnce([campaign]);
+    claimPendingContacts.mockResolvedValueOnce([contact(1)]);
+    await runTextOutreachTick(noon);
+    // Despite the sync throwing, the tick continued and sent the campaign batch.
+    expect(sendSms).toHaveBeenCalledTimes(1);
   });
 });

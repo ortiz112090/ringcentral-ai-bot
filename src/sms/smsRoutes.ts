@@ -7,6 +7,7 @@ import { BOT_ID, loadRemoteConfig } from "../db/remoteConfig";
 import { getTwilioAuthToken } from "../twilio/client";
 import { handleInboundSms, sendWebLeadText } from "./smsService";
 import { roleAllows } from "../roles";
+import { isGateReason, runSync } from "../campaigns/velocifySync";
 
 /**
  * SMS HTTP endpoints:
@@ -143,6 +144,43 @@ export async function handleTextOutreach(req: Request, res: Response): Promise<R
 
   const sent = await sendWebLeadText({ phone, name });
   return res.status(202).json({ accepted: true, sent });
+}
+
+/**
+ * Manual Velocify sync trigger: POST /v1/leads/:botId/velocify-sync. Auth mirrors
+ * handleTextOutreach EXACTLY — fail-closed 503 when TEXT_OUTREACH_SECRET is unset,
+ * constant-time X-Outreach-Secret match (401 otherwise), and the path botId must
+ * equal this deployment's tenant (404 otherwise). Runs runSync() immediately
+ * (ignoring the scheduled interval, still respecting the enabled + report-id + creds
+ * gates) and returns 200 with the counts JSON, or a gated {accepted:false, reason}
+ * (409 for a gate miss, 502 for a fetch/parse failure).
+ */
+export async function handleVelocifySync(req: Request, res: Response): Promise<Response> {
+  await loadRemoteConfig();
+
+  const expected = config.textOutreachSecret.trim();
+  if (expected === "") {
+    logger.error("Velocify sync endpoint hit but TEXT_OUTREACH_SECRET is unset; refusing");
+    return res.status(503).json({ error: "outreach_not_configured" });
+  }
+  const provided = (req.header("X-Outreach-Secret") ?? "").trim();
+  if (!provided || !secretsMatch(provided, expected)) {
+    logger.warn("Rejected velocify-sync: bad or missing shared secret");
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  if (req.params.botId !== BOT_ID) {
+    logger.warn("Rejected velocify-sync: botId does not match this tenant", {
+      pathBotId: req.params.botId,
+    });
+    return res.status(404).json({ error: "unknown_bot" });
+  }
+
+  const result = await runSync();
+  if (result.accepted) {
+    return res.status(200).json({ accepted: true, counts: result.counts });
+  }
+  const status = isGateReason(result.reason) ? 409 : 502;
+  return res.status(status).json({ accepted: false, reason: result.reason });
 }
 
 /**
@@ -304,3 +342,4 @@ function rcDestinationMatches(
 smsRouter.post("/webhooks/twilio/sms", handleSmsWebhook);
 smsRouter.post("/webhooks/ringcentral/sms", handleRcSmsWebhook);
 smsRouter.post("/v1/leads/:botId/text-outreach", handleTextOutreach);
+smsRouter.post("/v1/leads/:botId/velocify-sync", handleVelocifySync);
