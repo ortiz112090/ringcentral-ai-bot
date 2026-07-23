@@ -25,6 +25,7 @@ import {
   type CampaignRow,
 } from "./campaignQueries";
 import { pacePerTick } from "./rvmWorker";
+import { isVelocifySyncDue, runSync } from "./velocifySync";
 
 /**
  * Text-outreach worker.
@@ -236,6 +237,21 @@ export async function runTextOutreachTick(now: Date = new Date()): Promise<void>
   try {
     await loadRemoteConfig();
     const cfg = await resolveEffectiveConfig();
+
+    // Velocify report sync (piggybacks this tick, BEFORE campaign processing). Runs
+    // only when enabled + report id set + the interval has elapsed. runSync is
+    // never-throwing and self-guards against overlapping runs, so a sync failure can
+    // never block the campaign processing below — but wrap it defensively anyway.
+    if (isVelocifySyncDue(cfg.velocify, now)) {
+      try {
+        await runSync(now);
+      } catch (err) {
+        logger.error("Velocify sync threw during text-outreach tick (ignored)", {
+          botId: BOT_ID,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Role gate (fresh per tick): text-outreach runs only for the texting role.
     if (!roleAllows(cfg.botRole, "campaign_texts")) return;

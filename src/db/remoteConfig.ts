@@ -130,6 +130,23 @@ export interface BotConfigRow {
    * Nullable/absent-tolerant so schemas without the column resolve to the default.
    */
   bot_role: string | null;
+  // ---- Velocify report sync (see migration 0020_velocify_sync.sql) ----
+  /** Master toggle for the scheduled Velocify report sync (default false). */
+  velocify_sync_enabled: boolean | null;
+  /** Velocify report id to pull (e.g. '87'); sync is gated off until set. */
+  velocify_report_id: string | null;
+  /** Spreadsheet column letter holding the first name (default 'D'). */
+  velocify_first_name_column: string | null;
+  /** Spreadsheet column letter holding the phone (default 'F'). */
+  velocify_phone_column: string | null;
+  /** Case-insensitive first names to exclude (jsonb array; default ["inbound call"]). */
+  velocify_excluded_first_names: unknown;
+  /** Minimum minutes between scheduled syncs (default 360). */
+  velocify_sync_interval_minutes: number | null;
+  /** pace_per_hour applied to the auto-created campaign (default 100). */
+  velocify_pace_per_hour: number | null;
+  /** State: timestamp of the last successful sync (written by the bot). */
+  velocify_last_synced_at: string | null;
 }
 
 /** credentials keyed by provider name (e.g. "ringcentral", "openai"). */
