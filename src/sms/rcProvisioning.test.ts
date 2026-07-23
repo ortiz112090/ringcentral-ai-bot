@@ -263,6 +263,84 @@ describe("provisionRcSmsSubscription — create / idempotence / renewal", () => 
   });
 });
 
+describe("provisionRcSmsSubscription — stale bare-URL cleanup (token migration)", () => {
+  const TOKENIZED_ADDRESS = `${OUR_ADDRESS}?token=rc-token`;
+  const BARE_ADDRESS = OUR_ADDRESS; // pre-token, no query string
+
+  beforeEach(() => {
+    // Provisioning now points RC at the tokenized address.
+    webhookUrl.value = TOKENIZED_ADDRESS;
+  });
+
+  it("treats the old bare-URL subscription as stale: creates the tokenized one, then deletes the bare one AFTER success", async () => {
+    rcGet.mockResolvedValue({
+      records: [
+        {
+          id: "sub-bare",
+          deliveryMode: { transportType: "WebHook", address: BARE_ADDRESS },
+          expirationTime: farFuture(),
+        },
+      ],
+    });
+
+    await provisionRcSmsSubscription();
+
+    // A brand-new subscription is created at the tokenized address...
+    expect(rcPost).toHaveBeenCalledWith(
+      "/restapi/v1.0/subscription",
+      expect.objectContaining({
+        deliveryMode: expect.objectContaining({ address: TOKENIZED_ADDRESS }),
+      })
+    );
+    // ...and only then is the stale bare-URL subscription deleted.
+    expect(rcDelete).toHaveBeenCalledWith("/restapi/v1.0/subscription/sub-bare");
+    const createOrder = rcPost.mock.invocationCallOrder[0];
+    const deleteOrder = rcDelete.mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(deleteOrder);
+  });
+
+  it("does NOT delete the stale subscription if the create never succeeds", async () => {
+    rcGet.mockResolvedValue({
+      records: [
+        {
+          id: "sub-bare",
+          deliveryMode: { transportType: "WebHook", address: BARE_ADDRESS },
+          expirationTime: farFuture(),
+        },
+      ],
+    });
+    rcPost.mockRejectedValue(makeApiError("CMN-101", "invalid")); // non-transient → no retry
+
+    await provisionRcSmsSubscription();
+
+    expect(rcDelete).not.toHaveBeenCalled();
+  });
+
+  it("leaves the tokenized subscription alone and deletes a lingering bare one when both exist", async () => {
+    rcGet.mockResolvedValue({
+      records: [
+        {
+          id: "sub-token",
+          deliveryMode: { transportType: "WebHook", address: TOKENIZED_ADDRESS },
+          expirationTime: farFuture(),
+        },
+        {
+          id: "sub-bare",
+          deliveryMode: { transportType: "WebHook", address: BARE_ADDRESS },
+          expirationTime: farFuture(),
+        },
+      ],
+    });
+
+    await provisionRcSmsSubscription();
+
+    // Exact match is healthy → no create/renew; the lingering bare one is removed.
+    expect(rcPost).not.toHaveBeenCalled();
+    expect(rcDelete).toHaveBeenCalledWith("/restapi/v1.0/subscription/sub-bare");
+    expect(rcDelete).not.toHaveBeenCalledWith("/restapi/v1.0/subscription/sub-token");
+  });
+});
+
 describe("startRcSmsProvisioning", () => {
   it("runs an initial provision and installs a single unref'd poller", async () => {
     startRcSmsProvisioning();

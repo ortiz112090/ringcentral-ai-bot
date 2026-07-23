@@ -175,37 +175,50 @@ export function __resetRcDedupeForTests(): void {
 /**
  * RingCentral inbound-SMS webhook — the RC doorway into the SAME SMS pipeline as the
  * Twilio webhook (handleInboundSms). Steps:
- *   1. Subscription validation handshake: if a `Validation-Token` header is present,
- *      echo it back in the response header with 200 immediately (no processing).
- *   2. Fail-closed auth: require the `Verification-Token` header to equal env
- *      RC_SMS_WEBHOOK_TOKEN. Missing config → 503; wrong/missing token → 403.
- *   3. Parse the message-store instant event; only Inbound SMS is processed.
- *   4. Role gate + kill switch + destination match (fail closed) + dedupe, then hand
+ *   1. Fail-closed config check: missing RC_SMS_WEBHOOK_TOKEN → 503.
+ *   2. Auth: the shared secret rides in the subscription address as `?token=`, which
+ *      RC echoes on EVERY delivery (RC does not send a Verification-Token header on
+ *      real notifications). Accept a matching `?token=` query param; also accept a
+ *      matching `Verification-Token` or `Validation-Token` header as a fallback in
+ *      case RC starts sending them. Any one match is enough; otherwise → 403.
+ *   3. Subscription-validation handshake: echo any `Validation-Token` header back.
+ *      The validation probe carries no event body, so it returns 200 at step 4.
+ *   4. Parse the message-store instant event; only Inbound SMS is processed.
+ *   5. Role gate + kill switch + destination match (fail closed) + dedupe, then hand
  *      off to handleInboundSms on the 'ringcentral' channel.
  * Always acknowledges 200 to RC after auth so a processing hiccup never trips RC's
  * delivery-failure blacklisting; handleInboundSms is failure-tolerant.
  */
 export async function handleRcSmsWebhook(req: Request, res: Response): Promise<Response> {
-  // 1. Subscription validation handshake — echo the token, do nothing else.
-  const validationToken = req.header("Validation-Token");
-  if (validationToken) {
-    res.set("Validation-Token", validationToken);
-    return res.status(200).send();
-  }
-
-  // 2. Fail-closed verification-token auth.
+  // 1. Fail-closed config check.
   const expected = config.rcSmsWebhookToken.trim();
   if (expected === "") {
     logger.error("RingCentral SMS webhook hit but RC_SMS_WEBHOOK_TOKEN is unset; refusing");
     return res.status(503).send("rc_sms_not_configured");
   }
-  const provided = (req.header("Verification-Token") ?? "").trim();
-  if (!provided || !secretsMatch(provided, expected)) {
-    logger.warn("Rejected RingCentral SMS webhook: bad or missing verification token");
-    return res.status(403).send("invalid verification token");
+
+  // 2. Auth: query-param token (RC echoes the subscription address) OR a matching
+  //    Verification-Token / Validation-Token header. Constant-time compare each.
+  const queryToken = typeof req.query?.token === "string" ? req.query.token.trim() : "";
+  const validationToken = req.header("Validation-Token");
+  const verificationToken = (req.header("Verification-Token") ?? "").trim();
+  const validationValue = typeof validationToken === "string" ? validationToken.trim() : "";
+  const authorized =
+    (queryToken !== "" && secretsMatch(queryToken, expected)) ||
+    (verificationToken !== "" && secretsMatch(verificationToken, expected)) ||
+    (validationValue !== "" && secretsMatch(validationValue, expected));
+  if (!authorized) {
+    logger.warn("Rejected RingCentral SMS webhook: bad or missing webhook token");
+    return res.status(403).send("invalid webhook token");
   }
 
-  // 3. Parse the message-store instant event. body.body carries the message.
+  // 3. Subscription-validation handshake — echo the Validation-Token header (if any).
+  //    A probe carries no event body and falls through to the 200 at step 4.
+  if (validationToken) {
+    res.set("Validation-Token", validationToken);
+  }
+
+  // 4. Parse the message-store instant event. body.body carries the message.
   const messageBody = (req.body ?? {}).body as
     | {
         id?: unknown;
@@ -234,7 +247,7 @@ export async function handleRcSmsWebhook(req: Request, res: Response): Promise<R
     return res.status(200).send();
   }
 
-  // 4. Refresh tenant config so dashboard edits (rc_sms_number, kill switch) apply.
+  // 5. Refresh tenant config so dashboard edits (rc_sms_number, kill switch) apply.
   await loadRemoteConfig();
   const { text: textCfg, botRole } = await resolveEffectiveConfig();
 

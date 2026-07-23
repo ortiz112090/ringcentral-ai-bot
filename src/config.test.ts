@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 // the real cache starts empty (botConfig null) and BOT_ID from vitest.config.ts is
 // the primary tenant, so the plain env-first fallback applies.
 import "./db/remoteConfig";
-import { resolveEffectiveConfig, resolveRealtimeSpeed } from "./config";
+import { config, resolveEffectiveConfig, resolveRealtimeSpeed, ringcentralSmsWebhookUrl } from "./config";
 
 describe("resolveRealtimeSpeed clamp + default", () => {
   it("passes an in-range value through unchanged", () => {
@@ -119,5 +119,24 @@ describe("resolveEffectiveConfig rcSmsExtensionId", () => {
     process.env.RC_SMS_EXTENSION_ID = "4056789012";
     const eff = await resolveEffectiveConfig();
     expect(eff.text.rcSmsExtensionId).toBe("4056789012");
+  });
+});
+
+describe("ringcentralSmsWebhookUrl — secret rides in the ?token= query param", () => {
+  const original = config.rcSmsWebhookToken;
+  afterEach(() => {
+    config.rcSmsWebhookToken = original;
+  });
+
+  it("appends the url-encoded token as a query param (PUBLIC_BASE_URL is set in test env)", () => {
+    config.rcSmsWebhookToken = "s3cr et/&";
+    expect(ringcentralSmsWebhookUrl()).toBe(
+      `https://bot.example.com/webhooks/ringcentral/sms?token=${encodeURIComponent("s3cr et/&")}`
+    );
+  });
+
+  it("returns the bare URL (no query) when the token is unset", () => {
+    config.rcSmsWebhookToken = "";
+    expect(ringcentralSmsWebhookUrl()).toBe("https://bot.example.com/webhooks/ringcentral/sms");
   });
 });
