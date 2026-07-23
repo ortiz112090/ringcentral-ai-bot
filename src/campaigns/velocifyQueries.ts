@@ -1,7 +1,7 @@
 import { supabase } from "../db/supabase";
 import { logger } from "../logger";
 import { BOT_ID } from "../db/remoteConfig";
-import type { CampaignRow } from "./campaignQueries";
+import type { CampaignRow, CampaignStatus } from "./campaignQueries";
 
 /**
  * DB access for the Velocify report sync (multi-tenant, everything scoped by
@@ -84,9 +84,11 @@ export async function getKnownConversationPhones(
 
 /**
  * Find this bot's 'Velocify Report Sync' text_outreach campaign, creating it (status
- * running) when absent. When it already exists but its pace_per_hour differs from the
- * configured value, update it so a dashboard pace change applies. Returns the campaign
- * row, or null on error so the caller inserts nothing this run.
+ * running) when absent. When it already exists, re-activate it if the worker had
+ * auto-completed it (otherwise newly synced contacts would be silently swallowed,
+ * since the text-outreach worker only processes "running" campaigns) and apply a
+ * changed pace_per_hour — both folded into a single scoped update. Returns the
+ * campaign row, or null on error so the caller inserts nothing this run.
  */
 export async function findOrCreateVelocifyCampaign(
   pacePerHour: number,
@@ -109,16 +111,20 @@ export async function findOrCreateVelocifyCampaign(
 
   if (existing) {
     const row = existing as CampaignRow;
-    if (row.pace_per_hour !== pacePerHour) {
+    const update: { pace_per_hour?: number; status?: CampaignStatus } = {};
+    if (row.pace_per_hour !== pacePerHour) update.pace_per_hour = pacePerHour;
+    if (row.status !== "running") update.status = "running";
+    if (Object.keys(update).length > 0) {
       const { error: updErr } = await supabase
         .from("campaigns")
-        .update({ pace_per_hour: pacePerHour })
+        .update(update)
         .eq("bot_id", botId)
         .eq("id", row.id);
       if (updErr) {
-        logger.error("Velocify: failed to update campaign pace", { error: updErr.message });
+        logger.error("Velocify: failed to update campaign", { error: updErr.message });
       } else {
-        row.pace_per_hour = pacePerHour;
+        if (update.pace_per_hour !== undefined) row.pace_per_hour = update.pace_per_hour;
+        if (update.status !== undefined) row.status = update.status;
       }
     }
     return row;
