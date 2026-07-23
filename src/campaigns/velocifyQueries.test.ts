@@ -73,6 +73,7 @@ vi.mock("../logger", () => ({
 }));
 
 import {
+  createManualVelocifyCampaign,
   findOrCreateVelocifyCampaign,
   getKnownCampaignContactPhones,
   getKnownConversationPhones,
@@ -232,6 +233,29 @@ describe("findOrCreateVelocifyCampaign", () => {
   it("returns null on a read error", async () => {
     results.push({ error: { message: "db down" } });
     expect(await findOrCreateVelocifyCampaign(100)).toBeNull();
+  });
+});
+
+describe("createManualVelocifyCampaign", () => {
+  it("always inserts a fresh draft text_outreach campaign named 'Velocify Manual — <date>'", async () => {
+    results.push({ data: { id: "c-manual", name: "Velocify Manual — Jul 23, 2:15 PM" } }); // insert
+    const now = new Date("2026-07-23T21:15:00Z"); // 2:15 PM America/Los_Angeles
+    const row = await createManualVelocifyCampaign(100, now);
+    expect(row?.id).toBe("c-manual");
+    expect(calls).toHaveLength(1); // no lookup — always inserts
+    expect(calls[0].op).toBe("insert");
+    expect(calls[0].payload).toMatchObject({
+      bot_id: "bot-1",
+      campaign_type: "text_outreach",
+      status: "draft",
+      pace_per_hour: 100,
+    });
+    expect(calls[0].payload.name).toBe("Velocify Manual — Jul 23, 2:15 PM");
+  });
+
+  it("returns null on an insert error", async () => {
+    results.push({ error: { message: "db down" } });
+    expect(await createManualVelocifyCampaign(100, new Date())).toBeNull();
   });
 });
 
